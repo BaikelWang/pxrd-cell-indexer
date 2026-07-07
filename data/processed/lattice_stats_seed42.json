@@ -1,0 +1,8 @@
+{
+  "length_log_mean": 1.7431706944530294,
+  "length_log_std": 0.3864617871785287,
+  "angle_mean": 88.0105856561509,
+  "angle_std": 17.14844321550136,
+  "source": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/data/processed/train10k_seed42.jsonl",
+  "n_records": 10000
+}

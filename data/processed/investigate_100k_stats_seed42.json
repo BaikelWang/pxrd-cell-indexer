@@ -1,0 +1,134 @@
+{
+  "seed": 42,
+  "lmdb_path": "/nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb",
+  "train_size": 6088183,
+  "pool_size": 1200000,
+  "target_size": 100000,
+  "symprec": 0.01,
+  "stage_a": {
+    "atom_num": {
+      "p50": 5.0,
+      "p90": 16.0,
+      "p95": 20.0,
+      "p99": 36.0,
+      "median": 5.0,
+      "mean": 8.414863333333333,
+      "min": 1.0,
+      "max": 356.0
+    },
+    "peak_num_filtered": {
+      "p50": 17.0,
+      "p90": 40.0,
+      "p95": 51.0,
+      "p99": 75.0,
+      "median": 17.0,
+      "mean": 20.4432125,
+      "min": 1.0,
+      "max": 543.0
+    },
+    "peak_num_raw": {
+      "p50": 38.0,
+      "p90": 183.0,
+      "p95": 252.0,
+      "p99": 449.0,
+      "median": 38.0,
+      "mean": 73.24008916666666,
+      "min": 2.0,
+      "max": 141671.0
+    },
+    "atom_num_lt25": 1173871
+  },
+  "stage_b": {
+    "candidates_atom_num_lt25": 1173871,
+    "symmetry_success": 1173871,
+    "symmetry_fail": 0,
+    "crystal_system_counts_in_pool": {
+      "tetragonal": 326957,
+      "cubic": 279849,
+      "monoclinic": 189921,
+      "orthorhombic": 183511,
+      "trigonal": 132748,
+      "hexagonal": 39376,
+      "triclinic": 21509
+    }
+  },
+  "sample_10k": {
+    "targets_per_class": {
+      "cubic": 14286,
+      "tetragonal": 14286,
+      "orthorhombic": 14286,
+      "hexagonal": 14286,
+      "trigonal": 14286,
+      "monoclinic": 14285,
+      "triclinic": 14285
+    },
+    "per_class_selected": {
+      "cubic": 14286,
+      "tetragonal": 14286,
+      "orthorhombic": 14286,
+      "hexagonal": 14286,
+      "trigonal": 14286,
+      "monoclinic": 14285,
+      "triclinic": 14285
+    },
+    "shortfall_requested": 0,
+    "final_size": 100000,
+    "crystal_system_counts": {
+      "cubic": 14286,
+      "hexagonal": 14286,
+      "orthorhombic": 14286,
+      "tetragonal": 14286,
+      "trigonal": 14286,
+      "monoclinic": 14285,
+      "triclinic": 14285
+    },
+    "peak_num_filtered": {
+      "p50": 19.0,
+      "p90": 51.0,
+      "p95": 65.0,
+      "p99": 94.0,
+      "median": 19.0,
+      "mean": 24.89092,
+      "min": 1.0,
+      "max": 542.0
+    }
+  },
+  "max_peaks_candidates": {
+    "rationale": "cover ~95-99% of filtered peaks in pool/10k; trade-off vs attention O(N^2)",
+    "pool_peak_num_filtered": {
+      "p90": 40.0,
+      "p95": 51.0,
+      "p99": 75.0,
+      "median": 17.0,
+      "mean": 20.4432125,
+      "min": 1.0,
+      "max": 543.0
+    },
+    "sample10k_peak_num_filtered": {
+      "p90": 51.0,
+      "p95": 65.0,
+      "p99": 94.0,
+      "median": 19.0,
+      "mean": 24.89092,
+      "min": 1.0,
+      "max": 542.0
+    },
+    "candidates": [
+      {
+        "max_peaks": 51,
+        "covers_pool": "~95% (pool)",
+        "note": "conservative for training stability"
+      },
+      {
+        "max_peaks": 75,
+        "covers_pool": "~99% (pool)",
+        "note": "balanced default"
+      },
+      {
+        "max_peaks": 543,
+        "covers_pool": "100% (pool max; may be heavy for attention)",
+        "note": "no truncation"
+      }
+    ]
+  }
+}

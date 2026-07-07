@@ -1,0 +1,50 @@
+[project]
+name = "pxrd-cell-indexing"
+version = "0.0.0"
+description = "PXRD cell indexing model — PRXD-Cell-indexing-model-0706"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "torch>=2.4,<3",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "tensorboard>=2.16",
+    "pymatgen>=2024.1.1",
+    "lmdb>=1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8",
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Vendored RealPXRD transformer — keep upstream style, skip noisy rules
+"src/pxrd_cell_indexing/model/encoder/transformer/*.py" = ["E501", "E722"]
+"src/pxrd_cell_indexing/model/encoder/transformer/__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["pxrd_cell_indexing"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

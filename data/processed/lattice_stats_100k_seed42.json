@@ -1,0 +1,8 @@
+{
+  "length_log_mean": 1.7429445802404866,
+  "length_log_std": 0.3873247872174114,
+  "angle_mean": 88.17186763523911,
+  "angle_std": 17.139684289185066,
+  "source": "data/processed/train100k_seed42.jsonl",
+  "n_records": 100000
+}

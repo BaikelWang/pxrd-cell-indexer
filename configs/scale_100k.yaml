@@ -1,0 +1,35 @@
+experiment_name: scale_100k_seed42
+seed: 42
+device: cuda
+output_dir: results/experiments
+best_metric: top1_joint_match_rate
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_valid.lmdb
+  train_jsonl: data/processed/train100k_seed42.jsonl
+  valid_jsonl: data/processed/valid1400_seed42.jsonl
+  lattice_stats: data/processed/lattice_stats_100k_seed42.json
+  batch_size: 64
+  num_workers: 4
+  train_augment: true
+  valid_augment: false
+model:
+  encoder_checkpoint: /nanolab/users/wyx/archive/RealPXRD-Solver/pretrained/weight/2501/pxrd-all/last_one.ckpt
+  freeze_encoder: false
+  normalize_embedding: true
+  hidden_dim: 256
+  dropout: 0.1
+optim:
+  head_lr: 0.001
+  encoder_lr: 0.0001
+  weight_decay: 0.01
+  warmup_epochs: 1.0
+  max_epochs: 20
+  grad_clip: 1.0
+  early_stop_patience: 5
+loss:
+  classification: 1.0
+  regression: 1.0
+  use_uncertainty_weighting: false
+log_every: 20
+eval_every: 1

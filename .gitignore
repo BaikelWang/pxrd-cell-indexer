@@ -1,0 +1,75 @@
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# --- Test / lint / typecheck caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- ML experiment tracking ---
+wandb/
+mlruns/
+tensorboard/
+**/tensorboard/
+events.out.tfevents.*
+
+# --- Model checkpoints & weights (regenerate / download separately) ---
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+pretrained/
+checkpoints/
+
+# --- Large / generated data ---
+data/**/*.lmdb
+data/**/*.lmdb-lock
+data/processed/*.jsonl
+data/**/*.csv
+data/**/*.xy
+data/**/*.npz
+data/**/*.pkl
+data/**/*.h5
+data/**/*.hdf5
+
+# Keep small benchmark + stats manifests
+!data/MP-100samples-benchmark/
+!data/MP-100samples-benchmark/**
+!data/processed/*.json
+!data/README.md
+
+# --- Experiment outputs ---
+results/**/*
+!results/README.md
+
+# --- Local secrets / env ---
+.env
+.env.*
+*.local

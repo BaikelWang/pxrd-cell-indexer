@@ -1,0 +1,11 @@
+# Runtime dependencies — pin exact versions after Step 4 guardrails lock.
+pydantic>=2.0,<3
+
+# Confirmed 2026-07-07 (PM D17/D18/D20): 精简 vendoring encoder + 原生 PyTorch + TensorBoard
+# 不引入 lightning / hydra-core / torch-geometric / torch-scatter（D17 已否决完整依赖方案）
+torch>=2.4,<3
+numpy>=1.24
+pyyaml>=6.0
+tensorboard>=2.16
+pymatgen>=2024.1.1
+lmdb>=1.4
