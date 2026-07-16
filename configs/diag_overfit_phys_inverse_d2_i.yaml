@@ -1,0 +1,49 @@
+experiment_name: diag_overfit_phys_inverse_d2_i_seed42
+seed: 42
+device: cuda
+output_dir: results/experiments
+best_metric: strict_raw_top1_elementwise_rate
+eval_ltol: 0.3
+eval_atol_deg: 10.0
+strict_ltol: 0.05
+strict_atol_deg: 3.0
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  train_jsonl: data/processed/overfit700_seed42.jsonl
+  valid_jsonl: data/processed/overfit700_seed42.jsonl
+  lattice_stats: data/processed/lattice_matrix6_stats_100k_seed42.json
+  representation: matrix6
+  batch_size: 64
+  num_workers: 4
+  train_augment: false
+  valid_augment: false
+  augment_shift_range: 0.0
+model:
+  encoder_checkpoint: null
+  freeze_encoder: false
+  normalize_embedding: false
+  hidden_dim: 256
+  dropout: 0.0
+  encoder_type: bert
+  position_encoding: physical
+  peak_feature_mode: inverse_d2_i
+  wavelength_angstrom: 1.54184
+  intensity_transform: linear
+  hist_bins: 256
+  sorted_peak_count: 24
+  hist_pool: max
+  histogram_hidden_dim: 512
+  histogram_dropout: 0.0
+optim:
+  head_lr: 0.001
+  encoder_lr: 0.001
+  weight_decay: 0.0
+  warmup_epochs: 1.0
+  max_epochs: 120
+  grad_clip: 1.0
+  early_stop_patience: 999
+loss:
+  regression: 1.0
+log_every: 10
+eval_every: 5

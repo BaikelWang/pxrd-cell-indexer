@@ -1,0 +1,63 @@
+# LR-scaling probe B: batch 256 (4x champion's 64), LR sqrt-scaled to 0.002.
+# Short 5-epoch probe against champion (bs64/lr0.001) epoch-for-epoch numbers.
+experiment_name: probe_100k_bs256_lr002_seed42
+seed: 42
+device: cuda
+output_dir: results/experiments
+best_metric: strict_raw_top1_elementwise_rate
+eval_ltol: 0.3
+eval_atol_deg: 10.0
+strict_ltol: 0.05
+strict_atol_deg: 3.0
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_valid.lmdb
+  train_jsonl: data/processed/train100k_seed42.jsonl
+  valid_jsonl: data/processed/valid1400_seed42.jsonl
+  lattice_stats: data/processed/lattice_matrix6_stats_100k_seed42.json
+  representation: matrix6
+  batch_size: 256
+  num_workers: 16
+  train_augment: false
+  valid_augment: false
+  augment_shift_range: 0.0
+model:
+  encoder_checkpoint: null
+  freeze_encoder: false
+  normalize_embedding: false
+  hidden_dim: 256
+  dropout: 0.1
+  encoder_type: histogram
+  position_encoding: discrete
+  peak_feature_mode: legacy
+  wavelength_angstrom: 1.54184
+  intensity_transform: linear
+  hist_bins: 256
+  sorted_peak_count: 24
+  hist_pool: max
+  histogram_hidden_dim: 512
+  histogram_dropout: 0.1
+  intensity_min: 5.0
+  head_type: cs_conditional
+  use_cs_classifier: true
+  cs_route: predicted
+  train_cs_route: oracle
+  cubic_bravais_split: true
+  use_cubic_setting_classifier: true
+  setting_route: classifier
+  train_setting_route: oracle
+optim:
+  head_lr: 0.002
+  encoder_lr: 0.002
+  weight_decay: 0.01
+  warmup_epochs: 1.0
+  max_epochs: 5
+  grad_clip: 1.0
+  early_stop_patience: 6
+loss:
+  regression: 1.0
+  mode: baseline
+  classification: 0.1
+  setting_classification: 0.2
+log_every: 50
+eval_every: 1

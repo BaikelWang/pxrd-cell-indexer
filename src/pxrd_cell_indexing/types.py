@@ -58,7 +58,10 @@ class CellParameters(BaseModel):
 class LatticeCandidate(BaseModel):
     """One Top-K lattice indexing candidate."""
 
-    crystal_system: str = Field(..., description="One of the seven Bravais lattice families")
+    crystal_system: str = Field(
+        default="unknown",
+        description="Diagnostic crystal-system label from Bravais snap (not model-predicted)",
+    )
     a: float = Field(..., gt=0)
     b: float = Field(..., gt=0)
     c: float = Field(..., gt=0)
@@ -66,6 +69,14 @@ class LatticeCandidate(BaseModel):
     beta: float = Field(..., gt=0, lt=180)
     gamma: float = Field(..., gt=0, lt=180)
     confidence: float = Field(..., ge=0, description="Ranking confidence for this candidate")
+    bravais_key: str | None = Field(
+        default=None,
+        description="Bravais snap hypothesis key used to build this candidate",
+    )
+    fom_score: float | None = Field(
+        default=None,
+        description="de Wolff M(N) FOM after peak-table reranking (higher is better)",
+    )
 
 
 class IndexingInput(BaseModel):
@@ -83,7 +94,7 @@ class IndexingResult(BaseModel):
     sample_id: str
     candidates: list[LatticeCandidate] = Field(
         default_factory=list,
-        description="Top-K lattice candidates sorted by confidence (D19 K=20)",
+        description="Top-K lattice candidates (D19 K=20); sorted by FOM after rerank, else Bravais confidence",
     )
     cell: CellParameters | None = Field(
         None,

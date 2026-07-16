@@ -32,8 +32,14 @@
 
 | 文档 | 说明 |
 |---|---|
+| [`../references/README.md`](../references/README.md) | 外部论文/代码本地镜像：OpenAlphaDiffract、DeepLPnet、AIdex/AIdex-R2、Attention…Diffraction |
 | [`起点.md`](起点.md) | Cell Indexing 全历程复盘（2026-05～07 历史背景） |
+| [`20260713-RealPXRD-WithoutL-MP100评测与indexing对标综合报告.md`](20260713-RealPXRD-WithoutL-MP100评测与indexing对标综合报告.md) | Without-L MP100 复测、与 Mc/NN 口径澄清、可迁移启示 |
+| [`20260714-RealPXRD-纯XRD-lattice消融综合报告.md`](20260714-RealPXRD-纯XRD-lattice消融综合报告.md) | A2 消融：掐断 formula 后 MP100 elementwise 归零 |
+| [`20260715-CellIndexing-可执行优化方案v3.md`](20260715-CellIndexing-可执行优化方案v3.md) | **当前执行方案**：A0 评测 → E1c@100k → Peak Transformer → reciprocal metric → 训练课程/放量 → 全局搜索与排序 |
+| [`20260714-CellIndexing-Top1逐步优化方案v2.md`](20260714-CellIndexing-Top1逐步优化方案v2.md) | 已由 v3 取代；保留历史决策与阶段演进 |
 | [`20260706-任务初始化.md`](20260706-任务初始化.md) | 脚手架与文档约定 |
+| [`20260710-周报-W28.md`](20260710-周报-W28.md) | 本周工作总结（2026-07-06~07-10） |
 | [`20260706-训练数据调研-alex_aflow_oqmd_mp.md`](20260706-训练数据调研-alex_aflow_oqmd_mp.md) | 训练集 LMDB 规模、字段、PXRD 口径与子集候选 |
 | [`20260707-PM决策与待确认清单.md`](20260707-PM决策与待确认清单.md) | D1–D3、D5–D8、D10 确认；D4/D9 待定 |
 | [`20260707-输入形态调研-实验PXRD与Indexing工具对比.md`](20260707-输入形态调研-实验PXRD与Indexing工具对比.md) | 实验上传+λ 场景；RealPXRD/Mc/JADE/GSAS 输入对比与 D4 建议 |

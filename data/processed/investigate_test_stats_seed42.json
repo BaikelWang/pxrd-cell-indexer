@@ -1,0 +1,85 @@
+{
+  "seed": 42,
+  "lmdb_path": "/nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_test.lmdb",
+  "test_size": 25552,
+  "target_size": 1400,
+  "symprec": 0.01,
+  "stage_a": {
+    "atom_num": {
+      "p50": 5.0,
+      "p90": 16.0,
+      "p95": 20.0,
+      "p99": 32.0,
+      "median": 5.0,
+      "mean": 8.094747964934252,
+      "min": 1.0,
+      "max": 176.0
+    },
+    "peak_num_filtered": {
+      "p50": 16.0,
+      "p90": 39.0,
+      "p95": 50.0,
+      "p99": 74.0,
+      "median": 16.0,
+      "mean": 20.07165779586725,
+      "min": 1.0,
+      "max": 182.0
+    },
+    "atom_num_lt25": 25038
+  },
+  "stage_b": {
+    "candidates_atom_num_lt25": 25038,
+    "symmetry_success": 25038,
+    "symmetry_fail": 0,
+    "crystal_system_counts_in_test": {
+      "tetragonal": 6824,
+      "cubic": 6222,
+      "orthorhombic": 4027,
+      "monoclinic": 3910,
+      "trigonal": 2745,
+      "hexagonal": 877,
+      "triclinic": 433
+    }
+  },
+  "sample_test": {
+    "targets_per_class": {
+      "cubic": 200,
+      "tetragonal": 200,
+      "orthorhombic": 200,
+      "hexagonal": 200,
+      "trigonal": 200,
+      "monoclinic": 200,
+      "triclinic": 200
+    },
+    "per_class_selected": {
+      "cubic": 200,
+      "tetragonal": 200,
+      "orthorhombic": 200,
+      "hexagonal": 200,
+      "trigonal": 200,
+      "monoclinic": 200,
+      "triclinic": 200
+    },
+    "shortfall_requested": 0,
+    "final_size": 1400,
+    "crystal_system_counts": {
+      "cubic": 200,
+      "hexagonal": 200,
+      "monoclinic": 200,
+      "orthorhombic": 200,
+      "tetragonal": 200,
+      "triclinic": 200,
+      "trigonal": 200
+    },
+    "peak_num_filtered": {
+      "p50": 19.0,
+      "p90": 50.0,
+      "p95": 63.0,
+      "p99": 93.0,
+      "median": 19.0,
+      "mean": 24.832857142857144,
+      "min": 1.0,
+      "max": 159.0
+    }
+  }
+}

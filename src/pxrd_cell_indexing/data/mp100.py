@@ -1,4 +1,4 @@
-"""MP100 benchmark helpers: CIF → simulated peaks + primitive truth lattice."""
+"""MP100 benchmark helpers: CIF → simulated peaks + truth lattice."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pymatgen.analysis.diffraction.xrd import XRDCalculator
 from pymatgen.core import Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
+from pxrd_cell_indexing.data.canonical import CanonicalConvention, canonicalize_lattice
 from pxrd_cell_indexing.data.dataset import filter_peaks
 from pxrd_cell_indexing.types import CRYSTAL_SYSTEM_TO_IDX
 
@@ -27,8 +28,9 @@ class MP100Sample:
     two_theta: np.ndarray
     intensity: np.ndarray
     peak_num: int
-    truth_lattice: np.ndarray  # [a,b,c,alpha,beta,gamma] primitive
+    truth_lattice: np.ndarray  # [a,b,c,alpha,beta,gamma] under ``convention``
     crystal_system: str
+    convention: CanonicalConvention = "primitive"
     wavelength_angstrom: float = DEFAULT_WAVELENGTH_ANGSTROM
 
 
@@ -58,13 +60,32 @@ def primitive_lattice_params_from_structure(
     *,
     symprec: float = DEFAULT_SYMPREC,
 ) -> np.ndarray:
-    """Extract primitive six-parameter lattice labels (D1)."""
-    primitive = SpacegroupAnalyzer(structure, symprec=symprec).find_primitive()
-    lattice = primitive.lattice
-    return np.array(
-        [lattice.a, lattice.b, lattice.c, lattice.alpha, lattice.beta, lattice.gamma],
-        dtype=np.float32,
+    """Extract primitive six-parameter lattice labels (legacy D1)."""
+    return truth_lattice_params_from_structure(
+        structure, convention="primitive", symprec=symprec
     )
+
+
+def truth_lattice_params_from_structure(
+    structure: Structure,
+    *,
+    convention: CanonicalConvention = "niggli",
+    symprec: float = DEFAULT_SYMPREC,
+) -> np.ndarray:
+    """Extract six-parameter truth lattice under a crystallographic convention.
+
+    Always starts from the primitive cell (same as historical MP100 labels),
+    then applies ``canonicalize_lattice`` for ``reduced`` / ``niggli``.
+    """
+    primitive = SpacegroupAnalyzer(structure, symprec=symprec).find_primitive()
+    if convention == "primitive":
+        lattice = primitive.lattice
+        return np.array(
+            [lattice.a, lattice.b, lattice.c, lattice.alpha, lattice.beta, lattice.gamma],
+            dtype=np.float32,
+        )
+    can = canonicalize_lattice(primitive.lattice.matrix, convention=convention)
+    return can.as_array().astype(np.float32)
 
 
 def load_mp100_sample(
@@ -74,8 +95,13 @@ def load_mp100_sample(
     two_theta_max: float = DEFAULT_TWO_THETA_MAX,
     intensity_min: float = DEFAULT_INTENSITY_MIN,
     symprec: float = DEFAULT_SYMPREC,
+    convention: CanonicalConvention = "primitive",
 ) -> MP100Sample:
-    """Load one MP100 CIF and produce peaks + primitive truth lattice."""
+    """Load one MP100 CIF and produce peaks + truth lattice.
+
+    Default ``convention='primitive'`` preserves historical MP100 numbers.
+    For R9+ canonical models, pass ``convention='niggli'``.
+    """
     path = Path(cif_path)
     structure = Structure.from_file(path)
     two_theta, intensity = simulate_pxrd_from_structure(
@@ -84,7 +110,9 @@ def load_mp100_sample(
         two_theta_max=two_theta_max,
         intensity_min=intensity_min,
     )
-    truth = primitive_lattice_params_from_structure(structure, symprec=symprec)
+    truth = truth_lattice_params_from_structure(
+        structure, convention=convention, symprec=symprec
+    )
     crystal_system = SpacegroupAnalyzer(structure, symprec=symprec).get_crystal_system()
     if crystal_system not in CRYSTAL_SYSTEM_TO_IDX:
         raise ValueError(f"Unsupported crystal system from CIF {path}: {crystal_system}")
@@ -96,6 +124,7 @@ def load_mp100_sample(
         peak_num=int(two_theta.shape[0]),
         truth_lattice=truth,
         crystal_system=crystal_system,
+        convention=convention,
     )
 
 
@@ -106,6 +135,7 @@ def load_mp100_dataset(
     two_theta_max: float = DEFAULT_TWO_THETA_MAX,
     intensity_min: float = DEFAULT_INTENSITY_MIN,
     symprec: float = DEFAULT_SYMPREC,
+    convention: CanonicalConvention = "primitive",
 ) -> list[MP100Sample]:
     """Load all ``*.cif`` files under ``cif_dir`` sorted by filename."""
     directory = Path(cif_dir)
@@ -118,6 +148,7 @@ def load_mp100_dataset(
                 two_theta_max=two_theta_max,
                 intensity_min=intensity_min,
                 symprec=symprec,
+                convention=convention,
             )
         )
     return samples

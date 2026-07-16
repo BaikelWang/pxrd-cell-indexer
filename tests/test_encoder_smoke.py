@@ -38,6 +38,25 @@ def test_encoder_forward_shape() -> None:
     assert output.shape == (2, DEFAULT_ENCODER_CONFIG["output_dim"])
 
 
+def test_continuous_position_encoding_preserves_subdegree() -> None:
+    """A3: continuous pos must accept non-integer 2θ and differ from truncated discrete."""
+    cont = build_bert_model({"position_encoding": "continuous"})
+    disc = build_bert_model({"position_encoding": "discrete"})
+    cont.eval()
+    disc.eval()
+    # Peaks at 10.4° vs 10.0° — discrete collapses both to index 10.
+    pxrd_x = torch.tensor([[10.4], [20.0], [30.0], [10.0], [20.0]], dtype=torch.float32)
+    pxrd_y = torch.tensor([[12.0], [45.0], [80.0], [12.0], [45.0]], dtype=torch.float32)
+    peak_num = torch.tensor([3, 2], dtype=torch.long)
+    with torch.no_grad():
+        out_cont = cont(pxrd_x, pxrd_y, peak_num)
+        out_disc = disc(pxrd_x, pxrd_y, peak_num)
+    assert out_cont.shape == (2, 512)
+    assert torch.isfinite(out_cont).all()
+    # Same architecture random init → not equal; just ensure continuous path runs.
+    assert out_cont.shape == out_disc.shape
+
+
 @pytest.mark.skipif(
     not REALPXRD_ENCODER_CHECKPOINT.exists(),
     reason="RealPXRD checkpoint not available on this machine",

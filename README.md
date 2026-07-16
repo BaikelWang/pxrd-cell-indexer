@@ -1,8 +1,30 @@
 # PXRD Cell Indexer
 
-> Neural **cell indexing** from powder X-ray diffraction (PXRD) peak lists: predict **crystal system** and **primitive lattice** parameters as Top-K candidates.
+Neural **cell indexing** from powder XRD peak lists: predict a **primitive / Niggli lattice** `(a,b,c,α,β,γ)` (and post-hoc crystal system) from peaks-only input.
 
-Train a model on `alex_aflow_oqmd_mp` LMDB data, evaluate on the **MP100** benchmark (100 stratified CIFs), and compare against traditional engines (McMaille ~76%, JADE9 ~73% on ideal peaks).
+```text
+(2θ, I) peaks + λ  →  encoder  →  lattice head  →  Top-K / FOM (optional)  →  Top-1 cell
+```
+
+This is **indexing only** — not full-structure generation (RealPXRD Without L).
+
+---
+
+## Current status (2026-07-15)
+
+**North star (product):** MP100 @ strict `ltol=0.05`, `atol=3°` — beat JADE (~68%) / McMaille (~66%).  
+**Primary KPI (R&D):** valid1400 **strict raw Top-1 elementwise** (same tolerances).
+
+| Track | Best so far (valid1400 strict elem) | Notes |
+|---|---:|---|
+| **A2 Peak Transformer @100k** | **~33%** (`T48-geom`) | Current encoder lead; beats hist MLP |
+| A1 deep hist MLP @100k | ~27% (`E1c` 8×2048) | Capacity ceiling vs R10-slim |
+| R10-slim FiLM hist @100k | ~21% | Previous production baseline |
+| Loose FOM Top-1 (legacy) | ~88% test1400 | `ltol=0.3` / `atol=10°` — **not** the product metric |
+
+Peaks-only contract: **no** formula / atom types / true CS / true SG at inference.
+
+Latest plans & results: [`docs/开发日志/20260715-CellIndexing-可执行优化方案v3.md`](docs/开发日志/20260715-CellIndexing-可执行优化方案v3.md) · [`docs/04-progress.md`](docs/04-progress.md)
 
 ---
 
@@ -10,57 +32,38 @@ Train a model on `alex_aflow_oqmd_mp` LMDB data, evaluate on the **MP100** bench
 
 | | |
 |---|---|
-| **Input** | Variable-length PXRD peak table `(2θ, I)` + wavelength `λ` |
-| **Output** | Top-20 candidates: crystal system + primitive `(a,b,c,α,β,γ)` + confidence |
-| **Training** | `pxrd_241113_train.lmdb` (~6M samples, external path) |
-| **Benchmark** | `data/MP-100samples-benchmark/` (100 CIF, in-repo) |
-| **Baselines** | McMaille / JADE9 lattice match (ltol=0.3, atol=10°) |
-
-This is **cell indexing only** — not full-structure generation (RealPXRD Without L).
+| **Input** | Variable-length peak table `(2θ, I)` + wavelength `λ` |
+| **Output** | Lattice six-params; optional Bravais pool + FOM rerank → Top-1 |
+| **Training** | External LMDB `pxrd_241113_{train,valid}.lmdb` (~6M); common splits 3.5k / 10k / 100k |
+| **Benchmark** | `data/MP-100samples-benchmark/` (100 stratified CIFs, in-repo) |
+| **Label convention** | Niggli-reduced primitive cells end-to-end |
 
 ---
 
-## Architecture
+## Architecture (current default path)
 
 ```mermaid
 flowchart TD
-    subgraph Input
-        P["PXRD peak table<br/>(2θ, I) + λ"]
-    end
-
-    P --> F["Preprocess<br/>filter y>5 · pad · augment(train)"]
-    F --> E["BertModel Encoder<br/>(RealPXRD pretrained)"]
-    E --> V["512-d embedding"]
-
-    V --> C["Crystal system head<br/>7-class"]
-    V --> R["System-conditioned<br/>lattice regression heads"]
-
-    C --> K["Top-20 candidate builder<br/>variants · super/sub-cell"]
-    R --> K
-    K --> O["[(system, lattice, confidence), …]"]
+    P["PXRD peaks (2θ, I) + λ"] --> F["Preprocess<br/>I filter · optional augment"]
+    F --> E["Encoder<br/>Peak Transformer · or hist MLP"]
+    E --> V["embedding"]
+    V --> C["CS classifier optional"]
+    V --> H["Lattice head<br/>FiLM / matrix6"]
+    C --> H
+    H --> L["Niggli lattice<br/>(a,b,c,α,β,γ)"]
+    L --> K["Optional: Bravais Top-K + FOM"]
+    K --> O["Top-1 cell"]
 ```
 
-## Data flow
+**Encoders** (config-selectable):
 
-```mermaid
-flowchart LR
-    subgraph Train
-        T1["pxrd_241113_train.lmdb<br/>(external)"] --> T2["10k stratified sample<br/>train10k_seed42.jsonl"]
-        T2 --> T3["Trainer"]
-    end
+| Encoder | Idea |
+|---|---|
+| `peak_transformer` | Sorted peak tokens + Fourier(`g=1/d²`) PE — **A2 default (`T48-geom`)** |
+| `histogram` / `inverse_d2` | Fixed-bin bag-of-features MLP — R1–R11b line |
+| `peak_hist_fusion` / `spectrum_fusion` | Peak tokens + histogram / spectrum hybrids |
 
-    subgraph Valid
-        V1["pxrd_241113_valid.lmdb"] --> V2["valid1400_seed42.jsonl<br/>200/system"]
-        V2 --> T3
-    end
-
-    subgraph Eval
-        B["MP-100 CIF benchmark"] --> M["XRDCalculator peaks"]
-        M --> E["eval_mp100.py"]
-        T3 --> E
-        E --> R["lattice match · joint match"]
-    end
-```
+**Heads:** matrix6 regression (+ optional CS-conditional / FiLM). Crystal system can be predicted for routing; lattice match is the KPI.
 
 ---
 
@@ -68,25 +71,22 @@ flowchart LR
 
 ```
 pxrd-cell-indexer/
-├── README.md / AGENT.md       # navigation & collaboration contract
-├── configs/                   # experiment yaml configs
+├── README.md / AGENT.md
+├── configs/                      # smoke · 3500 · 100k · A2 ablations
 ├── docs/
-│   ├── 00-requirements.md     # requirements
-│   ├── 01-design.md           # architecture & decisions
-│   ├── 04-progress.md         # milestone log
-│   ├── 开发日志/              # work log (design, decisions, weekly)
-│   └── 实验记录/              # per-experiment settings & analysis
-├── src/pxrd_cell_indexing/    # core package
-│   ├── data/                  # dataset · mp100 · normalization
-│   ├── model/                 # encoder · heads · topk
-│   ├── training/              # config · trainer · checkpoint
+│   ├── 00-requirements.md … 04-progress.md
+│   ├── 开发日志/                 # plans, decisions, weekly notes
+│   ├── 实验记录/                 # per-run configs & metrics
+│   └── references/               # paper abstracts (local code/PDF mirrors gitignored)
+├── src/pxrd_cell_indexing/
+│   ├── data/                     # LMDB · splits · MP100 · Niggli
+│   ├── model/                    # encoders · heads · Bravais · FOM
+│   ├── training/                 # config · trainer · checkpoint
 │   ├── losses.py · eval.py
-├── scripts/                   # train · eval · diagnose
+├── scripts/                      # train · eval · diagnose · ablations
 ├── tests/
-├── data/
-│   ├── MP-100samples-benchmark/   # 100 CIF (tracked)
-│   └── processed/                 # jsonl ignored; stats json tracked
-└── results/                   # checkpoints & metrics (gitignored)
+├── data/MP-100samples-benchmark/ # tracked CIFs
+└── results/                      # gitignored checkpoints & metrics
 ```
 
 ---
@@ -105,43 +105,40 @@ pip install -e ".[dev]"
 make test          # ruff + mypy + pytest
 ```
 
-### Train (10k smoke)
+### Train
 
 ```bash
+# smoke
 python scripts/train.py --config configs/smoke_unfrozen.yaml
+
+# current A2 Peak Transformer @100k (example)
+python scripts/train.py --config configs/scale_100k_a2_t3_t48_geom.yaml
 ```
 
 ### Evaluate
 
 ```bash
-python scripts/eval_valid.py --checkpoint results/experiments/<run>/checkpoints/best.pt
+# raw / FOM on valid split
+python scripts/eval_valid.py --config configs/scale_100k_a2_t3_t48_geom.yaml \
+  --checkpoint results/experiments/<run>/checkpoints/best.pt
+
+# MP100
 python scripts/eval_mp100.py --checkpoint results/experiments/<run>/checkpoints/best.pt
 ```
+
+Always state the **tolerance protocol** when quoting numbers (strict vs loose).
 
 ---
 
 ## External dependencies (not in repo)
 
-| Resource | Path / note |
+| Resource | Note |
 |---|---|
 | Training LMDB | `alex_aflow_oqmd_mp/datasets/pxrd_241113_{train,valid}.lmdb` |
-| Pretrained encoder | `pretrained/weight/2501/pxrd-all/last_one.ckpt` (~145 MB) |
-| Processed splits | `data/processed/train10k_seed42.jsonl`, `valid1400_seed42.jsonl` (regenerate via `scripts/`) |
+| Pretrained RealPXRD Bert (legacy path) | `pretrained/weight/…` (~145 MB) |
+| Processed splits / stats | `data/processed/*.jsonl` ignored; small `*.json` stats tracked |
 
-See [`data/README.md`](data/README.md) for data conventions.
-
----
-
-## Current status
-
-| Milestone | Status |
-|---|---|
-| M1 Data + model design | ✅ |
-| M1.3–M1.9 Encoder / heads / train / eval pipeline | ✅ |
-| M2 10k smoke & tuning | 🟡 valid Top-1 lattice match **35.4%** |
-| M3 MP100 benchmark | 🟡 smoke weights Top-1 **47%** (plumbing verified) |
-
-Latest detail: [`docs/04-progress.md`](docs/04-progress.md)
+See [`data/README.md`](data/README.md).
 
 ---
 
@@ -149,10 +146,13 @@ Latest detail: [`docs/04-progress.md`](docs/04-progress.md)
 
 | Doc | Content |
 |---|---|
-| [`docs/00-requirements.md`](docs/00-requirements.md) | Goals, I/O, acceptance criteria |
-| [`docs/01-design.md`](docs/01-design.md) | Architecture, modules, PM decisions |
-| [`docs/开发日志/起点.md`](docs/开发日志/起点.md) | Cell Indexing history & benchmark context |
-| [`AGENT.md`](AGENT.md) | Collaboration rules for this project |
+| [`docs/00-requirements.md`](docs/00-requirements.md) | Goals & acceptance |
+| [`docs/01-design.md`](docs/01-design.md) | Architecture & PM decisions |
+| [`docs/04-progress.md`](docs/04-progress.md) | Milestone log |
+| [`docs/开发日志/起点.md`](docs/开发日志/起点.md) | Historical context vs Mc/JADE |
+| [`docs/开发日志/20260715-CellIndexing-可执行优化方案v3.md`](docs/开发日志/20260715-CellIndexing-可执行优化方案v3.md) | Current executable plan |
+| [`docs/实验记录/`](docs/实验记录/) | Experiment write-ups |
+| [`AGENT.md`](AGENT.md) | Collaboration contract |
 
 ---
 

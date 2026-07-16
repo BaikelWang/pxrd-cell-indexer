@@ -1,0 +1,41 @@
+experiment_name: diag_overfit_continuous_seed42
+seed: 42
+device: cuda
+# D-A2: same tiny set, continuous 2θ position encoding (no integer quantization).
+best_metric: strict_raw_top1_elementwise_rate
+output_dir: results/experiments
+eval_ltol: 0.3
+eval_atol_deg: 10.0
+strict_ltol: 0.05
+strict_atol_deg: 3.0
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  train_jsonl: data/processed/overfit700_seed42.jsonl
+  valid_jsonl: data/processed/overfit700_seed42.jsonl
+  lattice_stats: data/processed/lattice_matrix6_stats_100k_seed42.json
+  representation: matrix6
+  batch_size: 64
+  num_workers: 4
+  train_augment: false
+  valid_augment: false
+  augment_shift_range: 0.0
+model:
+  encoder_checkpoint: /nanolab/users/wyx/archive/RealPXRD-Solver/pretrained/weight/2501/pxrd-all/last_one.ckpt
+  freeze_encoder: false
+  normalize_embedding: true
+  hidden_dim: 256
+  dropout: 0.0
+  position_encoding: continuous
+optim:
+  head_lr: 0.001
+  encoder_lr: 0.0001
+  weight_decay: 0.0
+  warmup_epochs: 1.0
+  max_epochs: 80
+  grad_clip: 1.0
+  early_stop_patience: 999
+loss:
+  regression: 1.0
+log_every: 10
+eval_every: 4

@@ -73,3 +73,17 @@ results/**/*
 .env
 .env.*
 *.local
+
+# Local editor / Cursor
+.cursor/
+
+# Local literature mirrors (large / third-party)
+# Keep: docs/references/README.md + **/paper/*.md abstracts
+docs/references/**/code/
+docs/references/**/*.pdf
+docs/references/**/*.zip
+docs/references/**/*.onnx
+docs/references/**/*.pt
+docs/references/**/*.pth
+docs/references/**/*.ckpt
+docs/references/**/models_ICSD_CSD/

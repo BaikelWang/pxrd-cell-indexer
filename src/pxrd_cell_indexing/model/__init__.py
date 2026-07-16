@@ -6,7 +6,6 @@ from pxrd_cell_indexing.model.encoder.loader import (
     load_xrd_encoder_from_checkpoint,
 )
 from pxrd_cell_indexing.model.heads import (
-    CrystalSystemHead,
     HeadConfig,
     IndexingModel,
     LatticeRegressionHead,
@@ -15,7 +14,6 @@ from pxrd_cell_indexing.model.heads import (
 
 __all__ = [
     "BertModel",
-    "CrystalSystemHead",
     "DEFAULT_ENCODER_CONFIG",
     "HeadConfig",
     "IndexingModel",

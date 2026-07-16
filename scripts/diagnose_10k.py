@@ -17,8 +17,9 @@ from pxrd_cell_indexing.data.dataset import (
     PeakFilterConfig,
     build_dataloader,
 )
-from pxrd_cell_indexing.data.normalization import LatticeNormalizer
+from pxrd_cell_indexing.data.normalization import build_lattice_normalizer
 from pxrd_cell_indexing.eval import (
+    infer_crystal_system_idx_from_lattice,
     lattice_match_pymatgen,
     lattice_match_proxy,
     top1_lattice_match_rate,
@@ -140,7 +141,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not config_path.is_absolute():
         config_path = (PROJECT_ROOT / config_path).resolve()
     config = TrainConfig.from_yaml(config_path).resolve_paths(PROJECT_ROOT)
-    normalizer = LatticeNormalizer.from_json(config.data.lattice_stats)
+    normalizer = build_lattice_normalizer(config.data)
     model, checkpoint, experiment_name = load_indexing_model_from_checkpoint(
         args.checkpoint, config, device
     )
@@ -174,14 +175,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             }
             outputs = model(batch["pxrd_x"], batch["pxrd_y"], batch["peak_num"])
             pred = normalizer.denormalize(outputs["lattice_norm"])
-            pred_cs_idx = outputs["crystal_system_logits"].argmax(dim=-1)
+            pred_cs_idx = infer_crystal_system_idx_from_lattice(pred.cpu())
 
             for idx in range(pred.shape[0]):
                 truth_lattice = batch["lattice"][idx].cpu().tolist()
                 pred_lattice = pred[idx].cpu().tolist()
                 truth_cs_idx = int(batch["crystal_system_idx"][idx].item())
-                predicted_cs_idx = int(pred_cs_idx[idx].item())
-                cls_correct = truth_cs_idx == predicted_cs_idx
+                predicted_cs_idx = int(pred_cs_idx[idx])
+                cls_correct = predicted_cs_idx >= 0 and truth_cs_idx == predicted_cs_idx
                 lattice_match = lattice_match_pymatgen(pred_lattice, truth_lattice)
                 proxy_match = bool(
                     lattice_match_proxy(
@@ -194,7 +195,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 record = {
                     "sample_id": batch["sample_id"][idx],
                     "true_crystal_system": CRYSTAL_SYSTEMS[truth_cs_idx],
-                    "pred_crystal_system": CRYSTAL_SYSTEMS[predicted_cs_idx],
+                    "pred_crystal_system": (
+                        CRYSTAL_SYSTEMS[predicted_cs_idx]
+                        if predicted_cs_idx >= 0
+                        else "unknown"
+                    ),
                     "cls_correct": cls_correct,
                     "lattice_match": lattice_match,
                     "lattice_match_proxy": proxy_match,

@@ -1,0 +1,29 @@
+{
+  "seed": 42,
+  "train_path": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/data/processed/benchmark_train3500_seed42.jsonl",
+  "valid_path": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/data/processed/benchmark_valid700_seed42.jsonl",
+  "stats_path": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/data/processed/lattice_matrix6_stats_benchmark3500_seed42.json",
+  "train_n": 3500,
+  "valid_n": 700,
+  "train_cs": {
+    "cubic": 500,
+    "tetragonal": 500,
+    "orthorhombic": 500,
+    "hexagonal": 500,
+    "trigonal": 500,
+    "monoclinic": 500,
+    "triclinic": 500
+  },
+  "valid_cs": {
+    "cubic": 100,
+    "tetragonal": 100,
+    "orthorhombic": 100,
+    "hexagonal": 100,
+    "trigonal": 100,
+    "monoclinic": 100,
+    "triclinic": 100
+  },
+  "overlap": 0,
+  "label_convention": "primitive",
+  "blocked_keys": 3500
+}

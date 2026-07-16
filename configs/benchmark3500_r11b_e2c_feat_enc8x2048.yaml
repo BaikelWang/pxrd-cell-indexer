@@ -1,0 +1,67 @@
+# R11b-E2c: dual opt = E2 bag features (bins=512, peaks=48) + E1c encoder (8x2048).
+# 3500/Niggli + R10-slim FiLM; lr follows E1c (1e-3).
+experiment_name: benchmark3500_r11b_e2c_feat_enc8x2048_seed42
+seed: 42
+device: cuda
+output_dir: results/experiments
+best_metric: strict_raw_top1_elementwise_rate
+eval_ltol: 0.3
+eval_atol_deg: 10.0
+strict_ltol: 0.05
+strict_atol_deg: 3.0
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  train_jsonl: data/processed/benchmark_train3500_niggli_seed42.jsonl
+  valid_jsonl: data/processed/benchmark_valid700_niggli_seed42.jsonl
+  lattice_stats: data/processed/lattice_matrix6_stats_benchmark3500_niggli_seed42.json
+  representation: matrix6
+  batch_size: 256
+  num_workers: 4
+  train_augment: false
+  valid_augment: false
+  augment_shift_range: 0.0
+model:
+  encoder_checkpoint: null
+  freeze_encoder: false
+  normalize_embedding: false
+  hidden_dim: 512
+  dropout: 0.15
+  encoder_type: histogram
+  position_encoding: discrete
+  peak_feature_mode: legacy
+  wavelength_angstrom: 1.54184
+  intensity_transform: linear
+  hist_bins: 512
+  sorted_peak_count: 48
+  hist_pool: max
+  histogram_hidden_dim: 2048
+  histogram_num_blocks: 8
+  histogram_dropout: 0.15
+  intensity_min: 5.0
+  head_type: film
+  head_num_layers: 4
+  use_cs_classifier: true
+  cs_route: predicted
+  train_cs_route: oracle
+  cubic_bravais_split: false
+  use_cubic_setting_classifier: false
+  setting_route: oracle
+  train_setting_route: oracle
+optim:
+  head_lr: 0.001
+  encoder_lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 3.0
+  max_epochs: 100
+  min_epochs: 80
+  grad_clip: 1.0
+  early_stop_patience: null
+  save_best_loss: true
+loss:
+  regression: 1.0
+  mode: baseline
+  classification: 0.1
+  setting_classification: 0.0
+log_every: 10
+eval_every: 1

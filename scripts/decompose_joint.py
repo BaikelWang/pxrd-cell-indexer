@@ -15,8 +15,13 @@ from pxrd_cell_indexing.data.dataset import (
     PeakFilterConfig,
     build_dataloader,
 )
-from pxrd_cell_indexing.data.normalization import LatticeNormalizer
+from pxrd_cell_indexing.data.normalization import build_lattice_normalizer
 from pxrd_cell_indexing.eval import lattice_match_pymatgen
+from pxrd_cell_indexing.model.fom_rerank import (
+    add_fom_cli_args,
+    fom_config_from_args,
+    maybe_rerank_candidates,
+)
 from pxrd_cell_indexing.model.topk import TopKConfig, build_top_k_candidates
 from pxrd_cell_indexing.training.checkpoint import load_indexing_model_from_checkpoint
 from pxrd_cell_indexing.training.config import TrainConfig
@@ -26,6 +31,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _is_joint_candidate(cand: Any, truth_lat: list[float], truth_cs_idx: int) -> bool:
+    if cand.crystal_system == "unknown":
+        return False
+    if cand.crystal_system not in CRYSTAL_SYSTEM_TO_IDX:
+        return False
     cs_ok = CRYSTAL_SYSTEM_TO_IDX[cand.crystal_system] == truth_cs_idx
     lat = [cand.a, cand.b, cand.c, cand.alpha, cand.beta, cand.gamma]
     return cs_ok and lattice_match_pymatgen(lat, truth_lat)
@@ -37,12 +46,14 @@ def decompose(
     *,
     device: torch.device,
     top_k: int = 20,
+    rerank: str = "fom",
+    fom_config=None,
 ) -> dict[str, Any]:
     config = TrainConfig.from_yaml(config_path).resolve_paths(PROJECT_ROOT)
     model, _, experiment_name = load_indexing_model_from_checkpoint(
         checkpoint_path, config, device
     )
-    normalizer = LatticeNormalizer.from_json(config.data.lattice_stats)
+    normalizer = build_lattice_normalizer(config.data)
     loader = build_dataloader(
         PXRDDatasetConfig(
             lmdb_path=Path(config.data.valid_lmdb),
@@ -71,6 +82,7 @@ def decompose(
     fail_cs_wrong_lattice_ok_top1 = 0
     fail_both_bad_top1 = 0
     rank_when_in_pool: list[int] = []
+    lattice_rank_when_in_pool: list[int] = []
 
     with torch.no_grad():
         for batch in loader:
@@ -81,7 +93,6 @@ def decompose(
             outputs = model(batch["pxrd_x"], batch["pxrd_y"], batch["peak_num"])
             pred = normalizer.denormalize(outputs["lattice_norm"])
             cands_batch = build_top_k_candidates(
-                outputs["crystal_system_logits"],
                 pred,
                 k=top_k,
                 config=TopKConfig(k=top_k),
@@ -90,13 +101,24 @@ def decompose(
             for idx in range(pred.shape[0]):
                 truth_lat = batch["lattice"][idx].cpu().tolist()
                 truth_cs = int(batch["crystal_system_idx"][idx].item())
-                cands = cands_batch[idx]
+                cands = maybe_rerank_candidates(
+                    cands_batch[idx],
+                    rerank=rerank,
+                    pxrd_x=batch["pxrd_x"],
+                    pxrd_y=batch["pxrd_y"],
+                    peak_num=batch["peak_num"],
+                    sample_index=idx,
+                    fom_config=fom_config,
+                )
                 n += 1
 
                 top1 = cands[0]
                 top1_lat = [top1.a, top1.b, top1.c, top1.alpha, top1.beta, top1.gamma]
                 t1_lat = lattice_match_pymatgen(top1_lat, truth_lat)
-                t1_cs = CRYSTAL_SYSTEM_TO_IDX[top1.crystal_system] == truth_cs
+                t1_cs = (
+                    top1.crystal_system in CRYSTAL_SYSTEM_TO_IDX
+                    and CRYSTAL_SYSTEM_TO_IDX[top1.crystal_system] == truth_cs
+                )
 
                 if t1_cs:
                     cs_top1 += 1
@@ -115,10 +137,13 @@ def decompose(
                 pool_lat = False
                 pool_joint = False
                 joint_rank = None
+                lattice_rank = None
                 for rank, cand in enumerate(cands, start=1):
                     lat = [cand.a, cand.b, cand.c, cand.alpha, cand.beta, cand.gamma]
                     if lattice_match_pymatgen(lat, truth_lat):
                         pool_lat = True
+                        if lattice_rank is None:
+                            lattice_rank = rank
                     if _is_joint_candidate(cand, truth_lat, truth_cs):
                         pool_joint = True
                         if joint_rank is None:
@@ -126,6 +151,7 @@ def decompose(
 
                 if pool_lat:
                     lattice_in_pool += 1
+                    lattice_rank_when_in_pool.append(lattice_rank)
                 if pool_joint:
                     joint_in_pool += 1
                     rank_when_in_pool.append(joint_rank)
@@ -137,19 +163,27 @@ def decompose(
     def rate(count: int) -> float:
         return count / max(n, 1)
 
-    rank_dist: dict[str, float] = {}
-    if rank_when_in_pool:
+    def _rank_dist(ranks: list[int]) -> dict[str, float]:
+        if not ranks:
+            return {}
         from collections import Counter
 
-        counter = Counter(rank_when_in_pool)
-        for rank in sorted(counter):
-            rank_dist[f"rank_{rank}"] = counter[rank] / len(rank_when_in_pool)
+        counter = Counter(ranks)
+        return {
+            f"rank_{rank}": counter[rank] / len(ranks) for rank in sorted(counter)
+        }
+
+    rank_dist = _rank_dist(rank_when_in_pool)
+    lattice_rank_dist = _rank_dist(lattice_rank_when_in_pool)
 
     return {
         "experiment": experiment_name,
         "checkpoint": str(checkpoint_path),
         "n_samples": n,
         "top_k": top_k,
+        "rerank": rerank,
+        "fom_mode": fom_config.mode if fom_config is not None else None,
+        "fom_collapse_variants": fom_config.collapse_variants if fom_config is not None else None,
         "rates": {
             "crystal_system_top1": rate(cs_top1),
             "lattice_top1": rate(lattice_top1),
@@ -175,6 +209,7 @@ def decompose(
             "fail_both_bad_top1": fail_both_bad_top1,
         },
         "joint_rank_when_in_pool": rank_dist,
+        "lattice_rank_when_in_pool": lattice_rank_dist,
     }
 
 
@@ -182,7 +217,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(
         args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
     )
-    result = decompose(args.config, args.checkpoint, device=device, top_k=args.top_k)
+    fom_config = fom_config_from_args(args) if args.rerank == "fom" else None
+    result = decompose(
+        args.config,
+        args.checkpoint,
+        device=device,
+        top_k=args.top_k,
+        rerank=args.rerank,
+        fom_config=fom_config,
+    )
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
     with args.output_path.open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, ensure_ascii=False)
@@ -197,6 +240,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-path", type=Path, required=True)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument(
+        "--rerank",
+        type=str,
+        choices=("none", "fom"),
+        default="fom",
+        help="Candidate reranking after Top-K pool generation (default fom; use none for ablation)",
+    )
+    add_fom_cli_args(parser)
     return parser.parse_args()
 
 

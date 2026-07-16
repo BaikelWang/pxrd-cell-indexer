@@ -128,14 +128,32 @@ def filter_peaks(
     intensity: np.ndarray,
     intensity_min: float,
     max_peaks: int | None = None,
+    *,
+    truncate_mode: str = "top_intensity",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply y>5 filtering and optional max_peaks truncation."""
+    """Apply intensity filter and optional peak truncation.
+
+    ``truncate_mode``:
+      - ``top_intensity``: keep the strongest ``max_peaks`` peaks, then re-sort by 2θ
+        (preferred; avoids low-angle bias).
+      - ``first``: keep the first ``max_peaks`` peaks in input order (legacy / low-2θ bias).
+    """
     mask = intensity > intensity_min
     two_theta = two_theta[mask]
     intensity = intensity[mask]
     if max_peaks is not None and two_theta.shape[0] > max_peaks:
-        two_theta = two_theta[:max_peaks]
-        intensity = intensity[:max_peaks]
+        if truncate_mode == "first":
+            two_theta = two_theta[:max_peaks]
+            intensity = intensity[:max_peaks]
+        else:
+            order = np.argsort(intensity)[::-1][:max_peaks]
+            order = np.sort(order)  # restore ascending-2θ order among kept peaks
+            # Prefer true 2θ sort after intensity selection.
+            keep_tt = two_theta[order]
+            keep_i = intensity[order]
+            sort_idx = np.argsort(keep_tt)
+            two_theta = keep_tt[sort_idx]
+            intensity = keep_i[sort_idx]
     return two_theta.astype(np.float32), intensity.astype(np.float32)
 
 
@@ -238,7 +256,14 @@ class PXRDDataset(Dataset[DatasetSample]):
             max_peaks=self.config.peak_filter.max_peaks,
         )
 
-        if not self.config.xrd_augment:
+        # jsonl peak_num_filtered was exported under the default I>5 / no max_peaks
+        # filter. When runtime PeakFilterConfig intentionally differs, mismatch is
+        # expected and must not spam warnings (100k × warn kills training I/O).
+        export_default_filter = (
+            abs(float(self.config.peak_filter.intensity_min) - 5.0) < 1e-9
+            and self.config.peak_filter.max_peaks is None
+        )
+        if not self.config.xrd_augment and export_default_filter:
             if two_theta.shape[0] != record["peak_num_filtered"]:
                 message = (
                     f"peak count mismatch for {record['lmdb_key']}: "
@@ -325,14 +350,19 @@ def build_dataloader(
     num_workers: int = 4,
     shuffle: bool = True,
     pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = True,
 ) -> DataLoader[DatasetSample]:
     """Build a DataLoader with RealPXRD-compatible collate defaults."""
     dataset = build_train_dataset(config)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_peak_batch,
-    )
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": collate_peak_batch,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+    return DataLoader(dataset, **loader_kwargs)
