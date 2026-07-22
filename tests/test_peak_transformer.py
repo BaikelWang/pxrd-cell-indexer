@@ -145,6 +145,90 @@ def test_peak_transformer_empty_and_short() -> None:
     assert out.shape == (1, 128)
 
 
+def test_rel_attn_bias_cls_zero_and_pad_masked() -> None:
+    """B1: CLS row/col bias is 0; padded peak pairs contribute 0; shapes OK."""
+    enc = PeakGeometryTransformerEncoder(
+        {
+            "output_dim": 64,
+            "peak_transformer_token_mode": "geom",
+            "peak_transformer_max_peaks": 8,
+            "peak_transformer_dropout": 0.0,
+            "peak_transformer_num_layers": 2,
+            "peak_transformer_d_model": 64,
+            "peak_transformer_num_heads": 4,
+            "peak_transformer_ffn_dim": 128,
+            "peak_transformer_rel_attn": "scalar",
+        }
+    )
+    # Force non-zero scale so peak–peak bias is visible.
+    with torch.no_grad():
+        enc.rel_scale.fill_(1.0)
+    g = torch.tensor([[0.1, 0.2, 0.0, 0.0]], dtype=torch.float32)
+    pad = torch.tensor([[False, False, True, True]])
+    bias = enc.build_rel_attn_bias(g, pad)  # [B*H, 5, 5]
+    assert bias.shape == (4, 5, 5)
+    # CLS row and column exactly zero.
+    assert torch.equal(bias[:, 0, :], torch.zeros_like(bias[:, 0, :]))
+    assert torch.equal(bias[:, :, 0], torch.zeros_like(bias[:, :, 0]))
+    # Padded peak pairs (indices 3,4 in seq = peaks 2,3) stay zero.
+    assert torch.allclose(bias[:, 3:, 3:], torch.zeros(4, 2, 2))
+    # Valid peak–peak pair (seq 1,2) = g0-g1 = -0.1
+    assert torch.allclose(bias[:, 1, 2], torch.full((4,), -0.1))
+
+
+def test_rel_attn_mlp_and_forward_modes() -> None:
+    pxrd_x, pxrd_y, peak_num = _fake_batch()
+    for mode in ("scalar", "mlp"):
+        enc = PeakGeometryTransformerEncoder(
+            {
+                "output_dim": 128,
+                "peak_transformer_token_mode": "geom",
+                "peak_transformer_max_peaks": 20,
+                "peak_transformer_dropout": 0.0,
+                "peak_transformer_num_layers": 2,
+                "peak_transformer_d_model": 64,
+                "peak_transformer_num_heads": 4,
+                "peak_transformer_ffn_dim": 128,
+                "peak_transformer_rel_attn": mode,
+                "peak_transformer_rel_freqs": 8,
+            }
+        )
+        enc.eval()
+        with torch.no_grad():
+            out = enc(pxrd_x, pxrd_y, peak_num)
+            out0 = enc(
+                torch.zeros(0, 1),
+                torch.zeros(0, 1),
+                torch.tensor([0, 0], dtype=torch.long),
+            )
+        assert out.shape == (2, 128)
+        assert torch.isfinite(out).all()
+        assert torch.isfinite(out0).all()
+        # Zero-init φ → forward close to none-mode baseline at init.
+        enc_none = PeakGeometryTransformerEncoder(
+            {
+                "output_dim": 128,
+                "peak_transformer_token_mode": "geom",
+                "peak_transformer_max_peaks": 20,
+                "peak_transformer_dropout": 0.0,
+                "peak_transformer_num_layers": 2,
+                "peak_transformer_d_model": 64,
+                "peak_transformer_num_heads": 4,
+                "peak_transformer_ffn_dim": 128,
+                "peak_transformer_rel_attn": "none",
+            }
+        )
+        # Copy shared weights so only bias path differs (already zero).
+        enc_none.load_state_dict(
+            {k: v for k, v in enc.state_dict().items() if k in enc_none.state_dict()},
+            strict=False,
+        )
+        enc_none.eval()
+        with torch.no_grad():
+            out_none = enc_none(pxrd_x, pxrd_y, peak_num)
+        assert torch.allclose(out, out_none, atol=1e-5, rtol=1e-4)
+
+
 def test_build_indexing_model_peak_transformer() -> None:
     model = build_indexing_model(
         checkpoint_path=None,

@@ -20,6 +20,7 @@ from pxrd_cell_indexing.data.dataset import (
     build_dataloader,
 )
 from pxrd_cell_indexing.data.normalization import build_lattice_normalizer, head_output_dim
+from pxrd_cell_indexing.data.robust_perturb import RobustPerturbConfig
 from pxrd_cell_indexing.eval import (
     build_a0_metrics_block,
     evaluate_batch,
@@ -95,6 +96,8 @@ def _encoder_runtime_config(config: TrainConfig) -> dict[str, Any]:
         "peak_transformer_fourier_mode": model.peak_transformer_fourier_mode,
         "peak_transformer_g_floor": model.peak_transformer_g_floor,
         "peak_transformer_pool": model.peak_transformer_pool,
+        "peak_transformer_rel_attn": model.peak_transformer_rel_attn,
+        "peak_transformer_rel_freqs": model.peak_transformer_rel_freqs,
     }
 
 
@@ -120,6 +123,26 @@ def _build_loader(config: TrainConfig, split: str) -> Any:
         ),
         xrd_augment=data_cfg.train_augment if is_train else data_cfg.valid_augment,
         augment=SpectrumAugmentConfig(shift_range=data_cfg.augment_shift_range),
+        augment_mode=data_cfg.augment_mode,
+        robust_augment=RobustPerturbConfig(
+            clean_probability=data_cfg.robust_clean_probability,
+            global_zero_shift_deg=data_cfg.robust_global_zero_shift_deg,
+            per_peak_jitter_sigma_deg=data_cfg.robust_jitter_sigma_deg,
+            per_peak_jitter_clip_deg=data_cfg.robust_jitter_clip_deg,
+            peak_dropout_max_count=data_cfg.robust_dropout_max_count,
+            impurity_peak_max_count=data_cfg.robust_impurity_max_count,
+            impurity_intensity_frac_max=data_cfg.robust_impurity_intensity_frac_max,
+            intensity_noise_frac_range=(
+                data_cfg.robust_intensity_noise_frac_min,
+                data_cfg.robust_intensity_noise_frac_max,
+            ),
+            preferred_orientation_max_peak_frac=(
+                data_cfg.robust_preferred_orientation_max_peak_frac
+            ),
+            preferred_orientation_max_suppress_frac=(
+                data_cfg.robust_preferred_orientation_max_suppress_frac
+            ),
+        ),
         strict=False,
         seed_base=config.seed,
     )
@@ -320,12 +343,77 @@ class Trainer:
             setting_route=setting_route,
         )
 
-    def train(self) -> dict[str, Any]:
+    def load_resume_checkpoint(self, checkpoint_path: Path) -> int:
+        """Restore model/optim/best tracking from ``last.pt`` (or any trainer ckpt).
+
+        Returns the next epoch to run (1-based).
+        """
+        try:
+            ckpt = torch.load(
+                checkpoint_path, map_location=self.device, weights_only=False
+            )
+        except TypeError:
+            ckpt = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        done_epoch = int(ckpt.get("epoch", 0))
+        metrics_path = self.run_dir / "metrics.json"
+        if metrics_path.exists():
+            history = json.loads(metrics_path.read_text(encoding="utf-8"))
+            for row in history:
+                score = compute_best_metric_score(
+                    row.get("valid", {}),
+                    best_metric=self.config.best_metric,
+                )
+                if score > self.best_valid_metric:
+                    self.best_valid_metric = score
+                    self.best_epoch = int(row.get("epoch", 0))
+                vloss = float(row.get("valid", {}).get("loss", math.inf))
+                if vloss < self.best_valid_loss:
+                    self.best_valid_loss = vloss
+                    self.best_loss_epoch = int(row.get("epoch", 0))
+        # Approximate LR schedule position (overfit: 1 step/epoch; else steps×epochs).
+        steps_per_epoch = max(int(self._estimate_train_loader_len()), 1)
+        self.global_step = done_epoch * steps_per_epoch
+        self.scheduler = self._build_scheduler()
+        if self.global_step > 0:
+            # LambdaLR: set last_epoch so next step() uses the resumed schedule.
+            self.scheduler.last_epoch = self.global_step - 1
+        print(
+            f"[resume] loaded {checkpoint_path} epoch={done_epoch} "
+            f"global_step={self.global_step} best={self.best_valid_metric:.6f}"
+            f"@ep{self.best_epoch}",
+            flush=True,
+        )
+        return done_epoch + 1
+
+    def _estimate_train_loader_len(self) -> int:
+        if self._train_loader_len is not None:
+            return self._train_loader_len
+        # Side-effect: _build_scheduler / _estimate_total_steps cache this.
+        _ = self._estimate_total_steps()
+        assert self._train_loader_len is not None
+        return self._train_loader_len
+
+    def train(self, *, resume_from: Path | None = None) -> dict[str, Any]:
         train_loader = _build_loader(self.config, "train")
         valid_loader = _build_loader(self.config, "valid")
+        self._train_loader_len = len(train_loader)
         history: list[dict[str, Any]] = []
+        start_epoch = 1
+        if resume_from is not None:
+            resume_path = Path(resume_from)
+            if not resume_path.is_file():
+                raise FileNotFoundError(f"resume checkpoint not found: {resume_path}")
+            start_epoch = self.load_resume_checkpoint(resume_path)
+            metrics_path = self.run_dir / "metrics.json"
+            if metrics_path.exists():
+                history = json.loads(metrics_path.read_text(encoding="utf-8"))
+                # Drop any trailing partial rows beyond the checkpoint epoch.
+                history = [r for r in history if int(r.get("epoch", 0)) < start_epoch]
 
-        for epoch in range(1, self.config.optim.max_epochs + 1):
+        for epoch in range(start_epoch, self.config.optim.max_epochs + 1):
             ft_ep = self.config.model.hard_cs_finetune_epoch
             if ft_ep is not None and epoch == ft_ep:
                 self.model.set_encoder_trainable(False)
@@ -530,21 +618,37 @@ class Trainer:
                 "atol_deg": self.config.strict_atol_deg,
             }
             # Historical / funnel metrics (loose by default).
-            averaged["top1_lattice_match_rate"] = top1_lattice_match_rate(
-                valid_top1_preds, valid_truths, **loose_kw
-            )
-            averaged["raw_top1_lattice_match_rate"] = averaged["top1_lattice_match_rate"]
-            averaged["top1_joint_match_rate"] = top1_joint_match_rate(
-                valid_top1_preds,
-                valid_truths,
-                valid_pred_cs,
-                valid_target_cs,
-                **loose_kw,
-            )
+            if self.config.eval_pymatgen_match:
+                averaged["top1_lattice_match_rate"] = top1_lattice_match_rate(
+                    valid_top1_preds, valid_truths, **loose_kw
+                )
+                averaged["raw_top1_lattice_match_rate"] = averaged[
+                    "top1_lattice_match_rate"
+                ]
+                averaged["top1_joint_match_rate"] = top1_joint_match_rate(
+                    valid_top1_preds,
+                    valid_truths,
+                    valid_pred_cs,
+                    valid_target_cs,
+                    **loose_kw,
+                )
+                averaged["strict_raw_top1_lattice_match_rate"] = top1_lattice_match_rate(
+                    valid_top1_preds, valid_truths, **strict_kw
+                )
+            else:
+                # Fast path for P0: elementwise proxy instead of find_mapping.
+                loose_elem = top1_elementwise_match_rate(
+                    valid_top1_preds, valid_truths, **loose_kw
+                )
+                averaged["top1_lattice_match_rate"] = loose_elem
+                averaged["raw_top1_lattice_match_rate"] = loose_elem
+                averaged["top1_joint_match_rate"] = loose_elem
+                averaged["strict_raw_top1_lattice_match_rate"] = (
+                    top1_elementwise_match_rate(
+                        valid_top1_preds, valid_truths, **strict_kw
+                    )
+                )
             # North-star strict metrics (B4 dual-track).
-            averaged["strict_raw_top1_lattice_match_rate"] = top1_lattice_match_rate(
-                valid_top1_preds, valid_truths, **strict_kw
-            )
             averaged["strict_raw_top1_elementwise_rate"] = top1_elementwise_match_rate(
                 valid_top1_preds, valid_truths, **strict_kw
             )

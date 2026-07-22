@@ -26,6 +26,10 @@ LossMode = Literal[
     "angle_heavy",  # B1b: physical length+angle with large angle_weight
     "angle_prior",  # R2: matrix6 SmoothL1 + Bravais min-over-hypotheses angle prior
     "joint_phys",  # R3: SmoothL1 + additive truth-based length/angle (small λ)
+    "decoded_cell",  # A3-G2: SmoothL1(gstar6) + λ·(rel-len SmoothL1 + |Δ∠|/3 SmoothL1)
+    "soft_strict",  # A5: SmoothL1(gstar6) + λ·soft-max over normalized per-dim strict
+    # errors (log-sum-exp worst-free-dim proxy); targets the AND-gate strict metric
+    # directly instead of the mean error that SmoothL1/decoded_cell optimize.
     "manifold_consistency",  # R4: SmoothL1 + self-consistency to own CS's *unambiguous*
     # symmetry-fixed angles (tet/ortho α,β→90°; hex β→90°). Unlike angle_prior this
     # is a single deterministic target per dim, not a min-over-hypotheses guess, so
@@ -83,6 +87,8 @@ class LossWeights:
     peak_consistency_n_lines: int = 20
     """Use the first N observed peaks (sorted by 2θ)."""
     wavelength_angstrom: float = 1.54184
+    soft_strict_tau: float = 0.5
+    """A5: temperature for the log-sum-exp worst-dim soft-max (smaller = closer to hard max)."""
 
 
 # Cubic primitive settings (P / F / I) from Bravais constraint validation.
@@ -448,6 +454,60 @@ def _length_angle_physical_loss(
     return length_weight * loss_length + angle_weight * loss_angle
 
 
+def decoded_cell_loss(
+    pred_phys: torch.Tensor,
+    target_phys: torch.Tensor,
+) -> torch.Tensor:
+    """A3-G2 decoded-cell auxiliary loss (north-star aligned, not joint_phys /90).
+
+    SmoothL1 on relative length error + SmoothL1 on ``|Δangle_deg| / 3`` so a
+    3° angle miss is O(1), matching the strict atol Gate.
+    """
+    length_rel = torch.abs(pred_phys[..., :3] - target_phys[..., :3]) / torch.clamp(
+        target_phys[..., :3].abs(), min=1e-6
+    )
+    angle_scaled = torch.abs(pred_phys[..., 3:] - target_phys[..., 3:]) / 3.0
+    # Targets are zeros in residual space.
+    zeros_len = torch.zeros_like(length_rel)
+    zeros_ang = torch.zeros_like(angle_scaled)
+    return F.smooth_l1_loss(length_rel, zeros_len) + F.smooth_l1_loss(
+        angle_scaled, zeros_ang
+    )
+
+
+def soft_strict_loss(
+    pred_phys: torch.Tensor,
+    target_phys: torch.Tensor,
+    param_mask: torch.Tensor,
+    *,
+    ltol: float = 0.05,
+    atol_deg: float = 3.0,
+    tau: float = 0.5,
+) -> torch.Tensor:
+    """A5: log-sum-exp soft-max over per-dim errors normalized to the strict Gate.
+
+    Each free dimension's error is rescaled so 1.0 == exactly at the strict
+    tolerance boundary (``ltol`` relative for lengths, ``atol_deg`` absolute for
+    angles). The soft-max (temperature ``tau``) approximates the *worst* free
+    dimension, directly targeting the AND-gate strict metric instead of the
+    mean error SmoothL1/``decoded_cell`` optimize. Fixed (non-free) dims are
+    masked out of the soft-max via a large negative offset before scaling, so
+    they cannot suppress the true worst free dimension.
+    """
+    length_err = torch.abs(pred_phys[..., :3] - target_phys[..., :3]) / torch.clamp(
+        ltol * target_phys[..., :3].abs(), min=1e-6
+    )
+    angle_err = torch.abs(pred_phys[..., 3:] - target_phys[..., 3:]) / atol_deg
+    e = torch.cat([length_err, angle_err], dim=-1)
+    mask = param_mask.to(dtype=e.dtype)
+    # Finite (not -inf) sentinel keeps softmax/backward NaN-safe while still
+    # making masked dims negligible after dividing by tau.
+    sentinel = -1.0e4
+    e_masked = e * mask + (1.0 - mask) * sentinel
+    scaled = e_masked / max(tau, 1e-6)
+    return (torch.logsumexp(scaled, dim=-1) * tau).mean()
+
+
 def _strict_hinge_physical_loss(
     pred_phys: torch.Tensor,
     target_phys: torch.Tensor,
@@ -528,6 +588,8 @@ class IndexingLoss(nn.Module):
             "angle_heavy",
             "angle_prior",
             "joint_phys",
+            "decoded_cell",
+            "soft_strict",
             "manifold_consistency",
             "peak_consistency",
         )
@@ -559,6 +621,8 @@ class IndexingLoss(nn.Module):
                 raise ValueError(f"loss mode {mode!r} requires lattice_phys_target")
             if mode == "peak_consistency" and (pxrd_x is None or peak_num is None):
                 raise ValueError("loss mode peak_consistency requires pxrd_x and peak_num")
+            if mode == "soft_strict" and crystal_system_idx is None:
+                raise ValueError("loss mode soft_strict requires crystal_system_idx")
 
         if use_physical:
             pred_phys = self.normalizer.denormalize(lattice_norm_pred)
@@ -590,6 +654,24 @@ class IndexingLoss(nn.Module):
                     length_weight=self.weights.length_weight,
                     angle_weight=self.weights.angle_weight / 90.0,
                     huber_delta=max(self.weights.huber_delta / 90.0, 0.05),
+                )
+            elif mode == "decoded_cell":
+                # A3-G2: relative length + angle/3 SmoothL1 (not joint_phys /90).
+                loss_phys = decoded_cell_loss(pred_phys, lattice_phys_target)
+            elif mode == "soft_strict":
+                # A5: worst-free-dim soft-max normalized to the strict Gate.
+                soft_mask = _cs_mask_tensor(
+                    crystal_system_idx,  # type: ignore[arg-type]
+                    device=pred_phys.device,
+                    dtype=pred_phys.dtype,
+                )
+                loss_phys = soft_strict_loss(
+                    pred_phys,
+                    lattice_phys_target,
+                    soft_mask,
+                    ltol=self.weights.hinge_ltol,
+                    atol_deg=self.weights.hinge_atol_deg,
+                    tau=self.weights.soft_strict_tau,
                 )
             elif mode == "manifold_consistency":
                 if crystal_system_idx is None:
@@ -649,6 +731,16 @@ class IndexingLoss(nn.Module):
                 + self.weights.angle_prior_weight * loss_phys
             )
         elif mode == "joint_phys":
+            loss_total = (
+                self.weights.regression * loss_reg
+                + self.weights.physical_weight * loss_phys
+            )
+        elif mode == "decoded_cell":
+            loss_total = (
+                self.weights.regression * loss_reg
+                + self.weights.physical_weight * loss_phys
+            )
+        elif mode == "soft_strict":
             loss_total = (
                 self.weights.regression * loss_reg
                 + self.weights.physical_weight * loss_phys

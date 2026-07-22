@@ -385,3 +385,156 @@ def test_peak_consistency_loss_mode_end_to_end() -> None:
     assert out["loss_phys"].item() > 0
     assert out["loss_phys"].item() >= 0.0
 
+
+def test_decoded_cell_loss_finite_gradient() -> None:
+    """A3-G2: SmoothL1(norm) + λ·decoded_cell with finite grads through denorm."""
+    from pxrd_cell_indexing.data.normalization import GStar6Normalizer
+    from pxrd_cell_indexing.losses import decoded_cell_loss
+
+    stats = GStar6Normalizer(
+        component_mean=(-1.4, -1.6, -2.0, 0.0, 0.0, 0.0),
+        component_std=(0.3, 0.3, 0.4, 0.08, 0.04, 0.06),
+    )
+    loss_fn = IndexingLoss(
+        LossWeights(mode="decoded_cell", regression=1.0, physical_weight=0.05),
+        normalizer=stats,
+    )
+    target_phys = torch.tensor(
+        [
+            [5.0, 5.0, 5.0, 90.0, 90.0, 90.0],
+            [4.0, 6.0, 8.0, 90.0, 95.0, 90.0],
+        ],
+        dtype=torch.float32,
+        requires_grad=False,
+    )
+    target_norm = stats.normalize(target_phys).detach()
+    pred_norm = (target_norm + 0.1 * torch.randn_like(target_norm)).requires_grad_(True)
+    out = loss_fn(
+        pred_norm,
+        target_norm,
+        lattice_phys_target=target_phys,
+    )
+    assert torch.isfinite(out["loss_total"]).all()
+    assert out["loss_phys"].item() > 0
+    # λ=0.05 must enter the total
+    expected = out["loss_reg"] + 0.05 * out["loss_phys"]
+    assert torch.allclose(out["loss_total"], expected, rtol=1e-5, atol=1e-6)
+    out["loss_total"].backward()
+    assert pred_norm.grad is not None
+    assert torch.isfinite(pred_norm.grad).all()
+    assert pred_norm.grad.abs().sum().item() > 0
+
+    # Direct helper: 3° angle miss → SmoothL1(~1) contribution
+    pred = target_phys.clone()
+    pred[..., 3] = 93.0
+    direct = decoded_cell_loss(pred, target_phys)
+    assert torch.isfinite(direct).all()
+    assert direct.item() > 0
+
+
+def test_soft_strict_loss_finite_gradient() -> None:
+    """A5: SmoothL1(gstar6) + λ·soft_strict with finite grads through denorm."""
+    from pxrd_cell_indexing.data.normalization import GStar6Normalizer
+    from pxrd_cell_indexing.losses import soft_strict_loss
+
+    stats = GStar6Normalizer(
+        component_mean=(-1.4, -1.6, -2.0, 0.0, 0.0, 0.0),
+        component_std=(0.3, 0.3, 0.4, 0.08, 0.04, 0.06),
+    )
+    loss_fn = IndexingLoss(
+        LossWeights(mode="soft_strict", regression=1.0, physical_weight=0.1, soft_strict_tau=0.5),
+        normalizer=stats,
+    )
+    target_phys = torch.tensor(
+        [
+            [5.0, 5.0, 5.0, 90.0, 90.0, 90.0],
+            [4.0, 6.0, 8.0, 90.0, 95.0, 90.0],
+        ],
+        dtype=torch.float32,
+        requires_grad=False,
+    )
+    # cubic, monoclinic
+    cs_idx = torch.tensor([0, 5], dtype=torch.long)
+    target_norm = stats.normalize(target_phys).detach()
+    pred_norm = (target_norm + 0.1 * torch.randn_like(target_norm)).requires_grad_(True)
+    out = loss_fn(
+        pred_norm,
+        target_norm,
+        lattice_phys_target=target_phys,
+        crystal_system_idx=cs_idx,
+    )
+    assert torch.isfinite(out["loss_total"]).all()
+    assert out["loss_phys"].item() > 0
+    expected = out["loss_reg"] + 0.1 * out["loss_phys"]
+    assert torch.allclose(out["loss_total"], expected, rtol=1e-5, atol=1e-6)
+    out["loss_total"].backward()
+    assert pred_norm.grad is not None
+    assert torch.isfinite(pred_norm.grad).all()
+    assert pred_norm.grad.abs().sum().item() > 0
+
+
+def test_soft_strict_loss_requires_crystal_system_idx() -> None:
+    from pxrd_cell_indexing.data.normalization import GStar6Normalizer
+
+    stats = GStar6Normalizer(
+        component_mean=(-1.4, -1.6, -2.0, 0.0, 0.0, 0.0),
+        component_std=(0.3, 0.3, 0.4, 0.08, 0.04, 0.06),
+    )
+    loss_fn = IndexingLoss(LossWeights(mode="soft_strict"), normalizer=stats)
+    target_phys = torch.tensor([[5.0, 5.0, 5.0, 90.0, 90.0, 90.0]], dtype=torch.float32)
+    target_norm = stats.normalize(target_phys).detach()
+    with pytest.raises(ValueError, match="soft_strict"):
+        loss_fn(target_norm, target_norm, lattice_phys_target=target_phys)
+
+
+def test_soft_strict_loss_penalizes_worst_dim_direction() -> None:
+    """Perturbing the worst-error dim further must raise the loss more than
+    perturbing an already-good dim by the same normalized amount would lower
+    it -- i.e. the soft-max tracks the worst free dim, not the mean."""
+    from pxrd_cell_indexing.losses import soft_strict_loss
+
+    target = torch.tensor([[5.0, 5.0, 5.0, 90.0, 90.0, 90.0]], dtype=torch.float32)
+    # triclinic: all 6 dims free
+    mask = torch.ones((1, 6), dtype=torch.float32)
+
+    baseline_pred = target.clone()
+    baseline_pred[..., 0] = 5.1  # a: small 2% length error (near tol=5%)
+    baseline_pred[..., 3] = 90.5  # alpha: small 0.5deg error (well inside tol=3deg)
+    baseline = soft_strict_loss(baseline_pred, target, mask, tau=0.3)
+
+    # Worsen the already-worst dim (length a) -> loss should clearly increase.
+    worse_worst = baseline_pred.clone()
+    worse_worst[..., 0] = 5.3
+    loss_worse_worst = soft_strict_loss(worse_worst, target, mask, tau=0.3)
+    assert loss_worse_worst.item() > baseline.item()
+
+    # Worsen the already-good dim (alpha) by a much smaller absolute amount so
+    # it stays well below the worst dim's normalized error -> loss should
+    # barely move relative to worsening the worst dim.
+    worse_good = baseline_pred.clone()
+    worse_good[..., 3] = 90.6
+    loss_worse_good = soft_strict_loss(worse_good, target, mask, tau=0.3)
+    delta_worst = loss_worse_worst.item() - baseline.item()
+    delta_good = loss_worse_good.item() - baseline.item()
+    assert delta_worst > delta_good >= 0.0
+
+
+def test_soft_strict_loss_ignores_masked_dims() -> None:
+    """Fixed (symmetry-locked) dims must not influence the soft-max even when
+    their raw prediction is wildly wrong."""
+    from pxrd_cell_indexing.losses import soft_strict_loss
+
+    target = torch.tensor([[5.0, 5.0, 5.0, 90.0, 90.0, 90.0]], dtype=torch.float32)
+    # cubic mask: only the 3 lengths are free; angles are fixed by symmetry.
+    mask = torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0, 0.0]])
+
+    pred_clean = target.clone()
+    pred_clean[..., 0] = 5.05  # small free-dim error
+
+    pred_masked_blown_up = pred_clean.clone()
+    pred_masked_blown_up[..., 3:] = 150.0  # huge error on masked (fixed) angle dims
+
+    loss_clean = soft_strict_loss(pred_clean, target, mask, tau=0.3)
+    loss_masked_blown_up = soft_strict_loss(pred_masked_blown_up, target, mask, tau=0.3)
+    assert torch.allclose(loss_clean, loss_masked_blown_up, atol=1e-4)
+

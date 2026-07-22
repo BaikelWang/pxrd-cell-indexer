@@ -1,0 +1,86 @@
+# A4-C2 (v3 §8 / v4 §7): clean -> 80/20 perturb fine-tune from the A3-G1
+# winner. warm_start loads full model weights from the clean best ckpt;
+# LR = 0.1x the A3-G1 LR; short run (15 epochs); robust augment_mode with
+# clean_probability=0.8 (80% clean / 20% perturbed each epoch).
+experiment_name: scale_100k_a4_c2_finetune_seed43
+seed: 43
+device: cuda
+output_dir: results/experiments
+best_metric: strict_raw_top1_elementwise_rate
+eval_ltol: 0.3
+eval_atol_deg: 10.0
+strict_ltol: 0.05
+strict_atol_deg: 3.0
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_valid.lmdb
+  train_jsonl: data/processed/train100k_niggli_seed42.jsonl
+  valid_jsonl: data/processed/valid1400_niggli_seed42.jsonl
+  lattice_stats: data/processed/lattice_gstar6_stats_100k_niggli_seed42.json
+  representation: gstar6
+  batch_size: 256
+  num_workers: 4
+  train_augment: true
+  valid_augment: false
+  augment_shift_range: 0.0
+  augment_mode: robust
+  robust_clean_probability: 0.8
+  robust_global_zero_shift_deg: 0.3
+  robust_jitter_sigma_deg: 0.05
+  robust_jitter_clip_deg: 0.15
+  robust_dropout_max_count: 4
+  robust_impurity_max_count: 2
+  robust_impurity_intensity_frac_max: 0.2
+  robust_intensity_noise_frac_min: 0.05
+  robust_intensity_noise_frac_max: 0.10
+  robust_preferred_orientation_max_peak_frac: 0.3
+  robust_preferred_orientation_max_suppress_frac: 0.3
+model:
+  encoder_checkpoint: null
+  warm_start_checkpoint: results/experiments/scale_100k_a3_g1_gstar6_seed43/checkpoints/best.pt
+  freeze_encoder: false
+  normalize_embedding: false
+  embedding_dim: 512
+  hidden_dim: 512
+  dropout: 0.1
+  encoder_type: peak_transformer
+  peak_transformer_max_peaks: 48
+  peak_transformer_token_mode: geom
+  peak_transformer_d_model: 256
+  peak_transformer_num_layers: 4
+  peak_transformer_num_heads: 8
+  peak_transformer_ffn_dim: 1024
+  peak_transformer_dropout: 0.1
+  peak_transformer_fourier_freqs: 16
+  peak_transformer_pool: cls_mean
+  wavelength_angstrom: 1.54184
+  intensity_transform: linear
+  intensity_min: 5.0
+  head_type: cs_conditional
+  head_num_layers: 6
+  multi_hypothesis: false
+  num_hypotheses: 1
+  use_cs_classifier: true
+  cs_route: predicted
+  train_cs_route: oracle
+  cubic_bravais_split: false
+  use_cubic_setting_classifier: false
+  setting_route: oracle
+  train_setting_route: oracle
+optim:
+  head_lr: 0.0001
+  encoder_lr: 0.0001
+  weight_decay: 0.05
+  warmup_epochs: 0.5
+  max_epochs: 15
+  min_epochs: 10
+  grad_clip: 1.0
+  early_stop_patience: null
+  save_best_loss: true
+loss:
+  regression: 1.0
+  mode: baseline
+  classification: 0.1
+  setting_classification: 0.0
+log_every: 20
+eval_every: 1

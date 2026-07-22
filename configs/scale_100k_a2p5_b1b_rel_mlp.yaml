@@ -1,0 +1,73 @@
+# A2.5-B1b @100k: A2-ctrl + peak_transformer_rel_attn=mlp.
+# Baseline: A2-ctrl 40.57% strict. Requires P0-700 pass first.
+experiment_name: scale_100k_a2p5_b1b_rel_mlp_seed42
+seed: 42
+device: cuda
+output_dir: results/experiments
+best_metric: strict_raw_top1_elementwise_rate
+eval_ltol: 0.3
+eval_atol_deg: 10.0
+strict_ltol: 0.05
+strict_atol_deg: 3.0
+data:
+  train_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb
+  valid_lmdb: /nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_valid.lmdb
+  train_jsonl: data/processed/train100k_niggli_seed42.jsonl
+  valid_jsonl: data/processed/valid1400_niggli_seed42.jsonl
+  lattice_stats: data/processed/lattice_matrix6_stats_100k_niggli_seed42.json
+  representation: matrix6
+  batch_size: 256
+  num_workers: 4
+  train_augment: false
+  valid_augment: false
+  augment_shift_range: 0.0
+model:
+  encoder_checkpoint: null
+  freeze_encoder: false
+  normalize_embedding: false
+  embedding_dim: 512
+  hidden_dim: 512
+  dropout: 0.1
+  encoder_type: peak_transformer
+  peak_transformer_max_peaks: 48
+  peak_transformer_token_mode: geom
+  peak_transformer_d_model: 256
+  peak_transformer_num_layers: 4
+  peak_transformer_num_heads: 8
+  peak_transformer_ffn_dim: 1024
+  peak_transformer_dropout: 0.1
+  peak_transformer_fourier_freqs: 16
+  peak_transformer_pool: cls_mean
+  peak_transformer_rel_attn: mlp
+  peak_transformer_rel_freqs: 8
+  wavelength_angstrom: 1.54184
+  intensity_transform: linear
+  intensity_min: 5.0
+  head_type: cs_conditional
+  head_num_layers: 6
+  multi_hypothesis: false
+  num_hypotheses: 1
+  use_cs_classifier: true
+  cs_route: predicted
+  train_cs_route: oracle
+  cubic_bravais_split: false
+  use_cubic_setting_classifier: false
+  setting_route: oracle
+  train_setting_route: oracle
+optim:
+  head_lr: 0.001
+  encoder_lr: 0.001
+  weight_decay: 0.05
+  warmup_epochs: 3.0
+  max_epochs: 100
+  min_epochs: 40
+  grad_clip: 1.0
+  early_stop_patience: 20
+  save_best_loss: true
+loss:
+  regression: 1.0
+  mode: baseline
+  classification: 0.1
+  setting_classification: 0.0
+log_every: 10
+eval_every: 1

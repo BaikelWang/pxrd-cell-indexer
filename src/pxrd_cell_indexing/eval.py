@@ -362,9 +362,25 @@ def lattice_match_pymatgen(
     atol_deg: float = DEFAULT_ATOL_DEG,
 ) -> bool:
     """True if ``pred`` lattice is equivalent to ``target`` under pymatgen mapping."""
-    pred_lat = lattice_params_to_pmg_lattice(pred)
-    target_lat = lattice_params_to_pmg_lattice(target)
-    return pred_lat.find_mapping(target_lat, ltol=ltol, atol=atol_deg) is not None
+    pred_arr = np.asarray(pred, dtype=np.float64).reshape(-1)
+    target_arr = np.asarray(target, dtype=np.float64).reshape(-1)
+    if pred_arr.shape[0] != 6 or target_arr.shape[0] != 6:
+        return False
+    if not (np.isfinite(pred_arr).all() and np.isfinite(target_arr).all()):
+        return False
+    # Degenerate / near-flat cells can make find_mapping extremely expensive.
+    if float(np.min(pred_arr[:3])) < 0.4 or float(np.max(pred_arr[:3])) > 250.0:
+        return False
+    if float(np.min(pred_arr[3:])) < 15.0 or float(np.max(pred_arr[3:])) > 165.0:
+        return False
+    try:
+        if lattice_volume(pred_arr) < 1e-6:
+            return False
+        pred_lat = lattice_params_to_pmg_lattice(pred_arr)
+        target_lat = lattice_params_to_pmg_lattice(target_arr)
+        return pred_lat.find_mapping(target_lat, ltol=ltol, atol=atol_deg) is not None
+    except Exception:
+        return False
 
 
 def lattice_volume(params: Sequence[float] | np.ndarray) -> float:

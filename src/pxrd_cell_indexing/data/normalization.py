@@ -10,12 +10,17 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import torch
 
-from pxrd_cell_indexing.geometry import lattice_lengths_angles, lattice_params_to_matrix
+from pxrd_cell_indexing.geometry import (
+    gstar6_to_lattice,
+    lattice_lengths_angles,
+    lattice_params_to_matrix,
+    lattice_to_gstar6,
+)
 
 if TYPE_CHECKING:
     from pxrd_cell_indexing.training.config import DataConfig
 
-LatticeRepresentation = Literal["angles", "matrix6", "matrix9"]
+LatticeRepresentation = Literal["angles", "matrix6", "matrix9", "gstar6"]
 
 # Under our fixed canonical convention (lattice_params_to_matrix), matrix
 # positions [0,1], [2,0], [2,1] (a_y, c_x, c_y) are structurally always zero.
@@ -418,9 +423,135 @@ def compute_matrix9_stats_from_records(records: list[dict[str, Any]]) -> Matrix9
     )
 
 
+@dataclass(frozen=True)
+class GStar6Stats:
+    """Per-component z-score stats for reciprocal-metric Cholesky (A3 gstar6).
+
+    Component order: ``[log L11, log L22, log L33, L21, L31, L32]``.
+    """
+
+    component_mean: tuple[float, float, float, float, float, float]
+    component_std: tuple[float, float, float, float, float, float]
+    source: str = "train100k_niggli_seed42.jsonl"
+    representation: str = "gstar6"
+    convention: str = "niggli"
+    pack_order: str = "logL11,logL22,logL33,L21,L31,L32"
+
+
+def _lattice6_to_gstar6_numpy(lattice: np.ndarray) -> np.ndarray:
+    arr = np.asarray(lattice, dtype=np.float64).reshape(-1, 6)
+    tensor = torch.tensor(arr, dtype=torch.float64)
+    return lattice_to_gstar6(tensor).numpy()
+
+
+def _gstar6_to_lattice6_numpy(components: np.ndarray) -> np.ndarray:
+    arr = np.asarray(components, dtype=np.float64).reshape(-1, 6)
+    tensor = torch.tensor(arr, dtype=torch.float64)
+    return gstar6_to_lattice(tensor).numpy().astype(np.float32)
+
+
+def _lattice6_to_gstar6_torch(lattice: torch.Tensor) -> torch.Tensor:
+    return lattice_to_gstar6(lattice)
+
+
+def _gstar6_to_lattice6_torch(components: torch.Tensor) -> torch.Tensor:
+    return gstar6_to_lattice(components)
+
+
+@dataclass
+class GStar6Normalizer:
+    """Normalize lattice via packed reciprocal-metric Cholesky (A3).
+
+    ``normalize`` maps physical lattice6 → z-scored gstar6.
+    ``denormalize`` maps z-scored gstar6 → physical lattice6 for eval/loss.
+    """
+
+    component_mean: tuple[float, float, float, float, float, float]
+    component_std: tuple[float, float, float, float, float, float]
+
+    @classmethod
+    def from_stats(cls, stats: GStar6Stats) -> GStar6Normalizer:
+        std = tuple(max(value, 1e-8) for value in stats.component_std)
+        return cls(component_mean=stats.component_mean, component_std=std)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> GStar6Normalizer:
+        with Path(path).open(encoding="utf-8") as handle:
+            raw = json.load(handle)
+        stats = GStar6Stats(
+            component_mean=tuple(float(value) for value in raw["component_mean"]),
+            component_std=tuple(float(value) for value in raw["component_std"]),
+            source=str(raw.get("source", "")),
+            representation=str(raw.get("representation", "gstar6")),
+            convention=str(raw.get("convention", "niggli")),
+            pack_order=str(
+                raw.get("pack_order", "logL11,logL22,logL33,L21,L31,L32")
+            ),
+        )
+        return cls.from_stats(stats)
+
+    def _mean_tensor(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return torch.tensor(self.component_mean, device=device, dtype=dtype)
+
+    def _std_tensor(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return torch.tensor(self.component_std, device=device, dtype=dtype)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(
+            GStar6Stats(
+                component_mean=self.component_mean,
+                component_std=self.component_std,
+            )
+        )
+
+    def save(self, path: str | Path) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with Path(path).open("w", encoding="utf-8") as handle:
+            json.dump(self.to_dict(), handle, indent=2)
+
+    def normalize_numpy(self, lattice: np.ndarray) -> np.ndarray:
+        components = _lattice6_to_gstar6_numpy(lattice)
+        mean = np.asarray(self.component_mean, dtype=np.float64)
+        std = np.asarray(self.component_std, dtype=np.float64)
+        return ((components - mean) / std).astype(np.float32)
+
+    def denormalize_numpy(self, lattice_norm: np.ndarray) -> np.ndarray:
+        arr = np.asarray(lattice_norm, dtype=np.float64)
+        mean = np.asarray(self.component_mean, dtype=np.float64)
+        std = np.asarray(self.component_std, dtype=np.float64)
+        components = arr * std + mean
+        return _gstar6_to_lattice6_numpy(components)
+
+    def normalize(self, lattice: torch.Tensor) -> torch.Tensor:
+        components = _lattice6_to_gstar6_torch(lattice)
+        mean = self._mean_tensor(device=components.device, dtype=components.dtype)
+        std = self._std_tensor(device=components.device, dtype=components.dtype)
+        return (components - mean) / std
+
+    def denormalize(self, lattice_norm: torch.Tensor) -> torch.Tensor:
+        mean = self._mean_tensor(device=lattice_norm.device, dtype=lattice_norm.dtype)
+        std = self._std_tensor(device=lattice_norm.device, dtype=lattice_norm.dtype)
+        components = lattice_norm * std + mean
+        return _gstar6_to_lattice6_torch(components)
+
+
+def compute_gstar6_stats_from_records(records: list[dict[str, Any]]) -> GStar6Stats:
+    """Compute per-component z-score stats for gstar6 from jsonl-like records."""
+    if not records:
+        raise ValueError("records must not be empty")
+    lattice_batch = np.stack([_record_to_lattice6(record) for record in records], axis=0)
+    components = _lattice6_to_gstar6_numpy(lattice_batch)
+    mean = components.mean(axis=0)
+    std = components.std(axis=0)
+    return GStar6Stats(
+        component_mean=tuple(float(value) for value in mean.reshape(-1)),
+        component_std=tuple(float(value) for value in std.reshape(-1)),
+    )
+
+
 def head_output_dim(representation: LatticeRepresentation | str) -> int:
     """Regression head width implied by the lattice representation."""
-    if representation in ("angles", "matrix6"):
+    if representation in ("angles", "matrix6", "gstar6"):
         return 6
     if representation == "matrix9":
         return 9
@@ -429,13 +560,15 @@ def head_output_dim(representation: LatticeRepresentation | str) -> int:
 
 def build_lattice_normalizer(
     data_config: DataConfig,
-) -> LatticeNormalizer | MatrixLatticeNormalizer | Matrix9Normalizer:
+) -> LatticeNormalizer | MatrixLatticeNormalizer | Matrix9Normalizer | GStar6Normalizer:
     """Construct the lattice normalizer implied by ``data_config.representation``."""
     representation = getattr(data_config, "representation", "angles")
     if representation == "matrix6":
         return MatrixLatticeNormalizer.from_json(data_config.lattice_stats)
     if representation == "matrix9":
         return Matrix9Normalizer.from_json(data_config.lattice_stats)
+    if representation == "gstar6":
+        return GStar6Normalizer.from_json(data_config.lattice_stats)
     if representation == "angles":
         return LatticeNormalizer.from_json(data_config.lattice_stats)
     raise ValueError(f"Unsupported lattice representation: {representation!r}")

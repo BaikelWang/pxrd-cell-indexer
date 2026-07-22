@@ -24,6 +24,7 @@ from pxrd_cell_indexing.data.peak_features import (
 TokenMode = Literal["pos", "pos_i", "geom"]
 PoolMode = Literal["cls", "mean", "cls_mean", "attn", "cls_mean_max"]
 FourierMode = Literal["linear", "log", "loglinear"]
+RelAttnMode = Literal["none", "scalar", "mlp"]
 
 
 def _token_feature_dim(mode: TokenMode) -> int:
@@ -69,6 +70,19 @@ class PeakGeometryTransformerEncoder(nn.Module):
         ffn_dim = int(cfg.get("peak_transformer_ffn_dim", 1024))
         dropout = float(cfg.get("peak_transformer_dropout", 0.1))
         self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+
+        # A2.5-B1: physical relative attention bias b_ij = φ(g_i − g_j).
+        rel = str(cfg.get("peak_transformer_rel_attn", "none"))
+        if rel not in ("none", "scalar", "mlp"):
+            raise ValueError(
+                f"peak_transformer_rel_attn must be none|scalar|mlp, got {rel}"
+            )
+        self.rel_attn: RelAttnMode = rel  # type: ignore[assignment]
+        self.n_rel_freqs = int(cfg.get("peak_transformer_rel_freqs", 8))
+        if self.n_rel_freqs < 0:
+            raise ValueError("peak_transformer_rel_freqs must be >= 0")
 
         # Fourier features on normalized g=1/d². 0 disables (legacy Linear-on-raw).
         self.n_fourier = int(cfg.get("peak_transformer_fourier_freqs", 16))
@@ -140,6 +154,30 @@ class PeakGeometryTransformerEncoder(nn.Module):
         self.out_norm = nn.LayerNorm(pool_out_dim)
         self.out_proj = nn.Linear(pool_out_dim, self.output_dim)
         self.dropout = nn.Dropout(dropout)
+
+        # Relative-attn φ(Δg): zero-init so training starts at the no-bias baseline.
+        if self.rel_attn == "scalar":
+            self.rel_scale = nn.Parameter(torch.zeros(n_heads))
+            self.rel_mlp = None
+            self.register_buffer("_rel_freqs", torch.empty(0), persistent=False)
+        elif self.rel_attn == "mlp":
+            n_rf = max(self.n_rel_freqs, 1)
+            rel_freqs = torch.exp(torch.linspace(math.log(1.0), math.log(64.0), n_rf))
+            self.register_buffer("_rel_freqs", rel_freqs, persistent=False)
+            in_rel = 2 * n_rf
+            hidden_rel = max(n_heads * 2, 32)
+            self.rel_mlp = nn.Sequential(
+                nn.Linear(in_rel, hidden_rel),
+                nn.GELU(),
+                nn.Linear(hidden_rel, n_heads),
+            )
+            nn.init.zeros_(self.rel_mlp[-1].weight)
+            nn.init.zeros_(self.rel_mlp[-1].bias)
+            self.rel_scale = None
+        else:
+            self.rel_scale = None
+            self.rel_mlp = None
+            self.register_buffer("_rel_freqs", torch.empty(0), persistent=False)
 
         g_max = inverse_d2_max(
             wavelength_angstrom=self.wavelength,
@@ -300,6 +338,45 @@ class PeakGeometryTransformerEncoder(nn.Module):
         tokens = torch.where(valid_s.unsqueeze(-1), feats, torch.zeros_like(feats))
         return tokens, pad_mask
 
+    def _fourier_delta(self, delta: torch.Tensor) -> torch.Tensor:
+        """Fourier features of Δg → ``[..., 2 * n_rel_freqs]``."""
+        ang = delta.unsqueeze(-1) * self._rel_freqs.view(*([1] * delta.ndim), -1) * (2.0 * math.pi)
+        return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)
+
+    def build_rel_attn_bias(
+        self,
+        g: torch.Tensor,
+        pad_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Additive attn bias ``[B * H, 1+N, 1+N]`` from peak g=1/d² (normalized).
+
+        Bias applies only to peak–peak pairs; CLS row/column are exactly 0.
+        Padding is handled by ``src_key_padding_mask`` (not duplicated here).
+        """
+        if self.rel_attn == "none":
+            raise RuntimeError("build_rel_attn_bias called with rel_attn=none")
+        batch, n_peaks = g.shape
+        h = self.n_heads
+        # δ_ij = g_i − g_j  (query i, key j)
+        delta = g.unsqueeze(2) - g.unsqueeze(1)  # [B, N, N]
+        if self.rel_attn == "scalar":
+            assert self.rel_scale is not None
+            peak_bias = self.rel_scale.view(1, h, 1, 1) * delta.unsqueeze(1)
+        else:
+            assert self.rel_mlp is not None
+            feat = self._fourier_delta(delta)  # [B, N, N, 2F]
+            peak_bias = self.rel_mlp(feat).permute(0, 3, 1, 2).contiguous()  # [B, H, N, N]
+
+        # Zero out any contribution involving padded peaks (keeps CLS path clean).
+        valid = (~pad_mask).to(dtype=peak_bias.dtype)
+        pair = valid.unsqueeze(2) * valid.unsqueeze(1)  # [B, N, N]
+        peak_bias = peak_bias * pair.unsqueeze(1)
+
+        seq = n_peaks + 1
+        bias = g.new_zeros(batch, h, seq, seq)
+        bias[:, :, 1:, 1:] = peak_bias
+        return bias.reshape(batch * h, seq, seq)
+
     def forward(
         self,
         pxrd_x: torch.Tensor,
@@ -320,6 +397,19 @@ class PeakGeometryTransformerEncoder(nn.Module):
         cls_pad = torch.zeros(batch, 1, dtype=torch.bool, device=tokens.device)
         key_padding_mask = torch.cat([cls_pad, pad_mask], dim=1)
         x = self.dropout(x)
-        x = self.encoder(x, src_key_padding_mask=key_padding_mask)
+        if self.rel_attn != "none":
+            # tokens[..., 0] is normalized g. Merge padding into the float mask so
+            # mask dtype matches (PyTorch warns on float mask + bool padding).
+            g = tokens[..., 0]
+            attn_mask = self.build_rel_attn_bias(g, pad_mask)
+            neg = torch.finfo(attn_mask.dtype).min
+            # key_padding_mask True → block that key for all queries / heads.
+            pad_keys = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B,1,1,L]
+            attn_mask = attn_mask.view(batch, self.n_heads, *attn_mask.shape[-2:])
+            attn_mask = attn_mask.masked_fill(pad_keys, neg)
+            attn_mask = attn_mask.reshape(batch * self.n_heads, *attn_mask.shape[-2:])
+            x = self.encoder(x, mask=attn_mask, src_key_padding_mask=None)
+        else:
+            x = self.encoder(x, src_key_padding_mask=key_padding_mask)
         pooled = self._pool(x, pad_mask)
         return self.out_proj(self.out_norm(pooled))

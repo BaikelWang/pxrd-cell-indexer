@@ -42,6 +42,21 @@ class DataConfig:
     # B2: upsample hard crystal systems in the train jsonl (1.0 = no upsample).
     hard_cs_upsample: float = 1.0
     hard_cs_names: tuple[str, ...] = ("hexagonal", "trigonal", "monoclinic", "triclinic")
+    # A4 (v3 §8 / v4 §7): "legacy" = original shift+noise augment; "robust" =
+    # auditable clean/perturb mix (global zero-shift, per-peak jitter, dropout,
+    # impurity peaks, intensity noise, preferred orientation).
+    augment_mode: Literal["legacy", "robust"] = "legacy"
+    robust_clean_probability: float = 0.8
+    robust_global_zero_shift_deg: float = 0.3
+    robust_jitter_sigma_deg: float = 0.05
+    robust_jitter_clip_deg: float = 0.15
+    robust_dropout_max_count: int = 4
+    robust_impurity_max_count: int = 2
+    robust_impurity_intensity_frac_max: float = 0.2
+    robust_intensity_noise_frac_min: float = 0.05
+    robust_intensity_noise_frac_max: float = 0.10
+    robust_preferred_orientation_max_peak_frac: float = 0.3
+    robust_preferred_orientation_max_suppress_frac: float = 0.3
 
 
 @dataclass
@@ -109,6 +124,10 @@ class ModelConfig:
     """Lower clamp on normalized g for the log-Fourier band."""
     peak_transformer_pool: Literal["cls", "mean", "cls_mean", "attn", "cls_mean_max"] = "cls_mean"
     """Pooling after Transformer: cls | mean | 0.5*(cls+mean) | attn | cls⊕mean⊕max."""
+    peak_transformer_rel_attn: Literal["none", "scalar", "mlp"] = "none"
+    """A2.5-B1: relative attn bias φ(g_i−g_j); none|scalar|mlp."""
+    peak_transformer_rel_freqs: int = 8
+    """Fourier frequencies on Δg for rel_attn=mlp."""
     intensity_min: float = 5.0
     max_peaks: int | None = None
     warm_start_checkpoint: str | None = None
@@ -174,6 +193,10 @@ class TrainConfig:
     strict_atol_deg: float = 3.0
     log_every: int = 20
     eval_every: int = 1
+    # When False, skip pymatgen find_mapping (expensive / can hang on degenerate
+    # cells). Funnel mapping rates fall back to elementwise; north-star elementwise
+    # Gate is unaffected. Recommended for P0-700 overfits.
+    eval_pymatgen_match: bool = True
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> TrainConfig:
@@ -230,6 +253,8 @@ class TrainConfig:
             "peak_transformer_fourier_mode": model_raw.get("peak_transformer_fourier_mode", "linear"),
             "peak_transformer_g_floor": float(model_raw.get("peak_transformer_g_floor", 1e-3)),
             "peak_transformer_pool": model_raw.get("peak_transformer_pool", "cls_mean"),
+            "peak_transformer_rel_attn": model_raw.get("peak_transformer_rel_attn", "none"),
+            "peak_transformer_rel_freqs": int(model_raw.get("peak_transformer_rel_freqs", 8)),
             "intensity_min": float(model_raw.get("intensity_min", 5.0)),
             "max_peaks": max_peaks,
             "warm_start_checkpoint": model_raw.get("warm_start_checkpoint"),
@@ -307,6 +332,7 @@ class TrainConfig:
                         model_raw.get("wavelength_angstrom", 1.54184),
                     )
                 ),
+                soft_strict_tau=float(loss_raw.get("soft_strict_tau", 0.5)),
             ),
             best_metric=raw.get("best_metric", "top1_lattice_match_rate"),
             eval_ltol=float(raw.get("eval_ltol", 0.3)),
@@ -315,6 +341,7 @@ class TrainConfig:
             strict_atol_deg=float(raw.get("strict_atol_deg", 3.0)),
             log_every=raw.get("log_every", 20),
             eval_every=raw.get("eval_every", 1),
+            eval_pymatgen_match=bool(raw.get("eval_pymatgen_match", True)),
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -17,6 +17,10 @@ import torch
 from numpy.random import Generator
 from torch.utils.data import DataLoader, Dataset, get_worker_info
 
+from pxrd_cell_indexing.data.robust_perturb import (
+    RobustPerturbConfig,
+    apply_random_robust_perturbation,
+)
 from pxrd_cell_indexing.types import CRYSTAL_SYSTEM_TO_IDX
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,10 @@ class PXRDDatasetConfig:
     peak_filter: PeakFilterConfig = PeakFilterConfig()
     xrd_augment: bool = False
     augment: SpectrumAugmentConfig = SpectrumAugmentConfig()
+    augment_mode: str = "legacy"
+    """A4 (v3 §8/v4 §7): "legacy" = original always-on shift+noise augment;
+    "robust" = auditable clean/perturb mix via ``robust_augment`` below."""
+    robust_augment: RobustPerturbConfig = RobustPerturbConfig()
     strict: bool = False
     seed_base: int = 42
 
@@ -272,6 +280,14 @@ class PXRDDataset(Dataset[DatasetSample]):
                 if self.config.strict:
                     raise ValueError(message)
                 warnings.warn(message, stacklevel=2)
+        elif self.config.xrd_augment and self.config.augment_mode == "robust":
+            two_theta, intensity = apply_random_robust_perturbation(
+                two_theta,
+                intensity,
+                self.config.robust_augment,
+                self._ensure_rng(),
+                intensity_min=self.config.peak_filter.intensity_min,
+            )
         else:
             pre_filter = intensity.copy()
             two_theta, intensity = augment_spectrum(

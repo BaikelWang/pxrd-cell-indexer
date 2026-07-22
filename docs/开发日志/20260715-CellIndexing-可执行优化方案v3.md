@@ -453,19 +453,28 @@ G^*=LL^\mathsf T
 
 ### 7.3 实验矩阵
 
-固定 A2 winner encoder 和 FiLM 条件化方式：
+固定架构基线为 **A2-ctrl**（Peak Transformer T48-geom + `cs_conditional` L=6；A2.5 已证明 `cs_conditional ≫ film/shared`，不再使用 FiLM）：
 
-| 实验 | 输出 | Loss |
-|---|---|---|
-| A3-G0 | matrix6 | 当前 SmoothL1 |
-| A3-G1 | gstar6 | normalized gstar6 SmoothL1 |
-| A3-G2 | gstar6 | G1 + 小权重 decoded cell loss |
+| 实验 | 输出 | Loss | 结果（valid1400 strict） |
+|---|---|---|---|
+| A3-G0 | matrix6 | SmoothL1 | **40.57%**（seed42，既有 A2-ctrl） |
+| A3-G1 | gstar6 | normalized gstar6 SmoothL1 | seed42/43/44 = **42.50 / 43.71 / 43.00%**；mean **43.07%**（+2.50pp）→ **锁定生产默认** |
+| A3-G2 | gstar6 | G1 + decoded-cell λ=0.05 | P0-700 best **78.6%≪95%** → **淘汰**，不跑 100k |
 
 G2 的 decoded loss：
 
 - length 使用 relative SmoothL1；
 - angle 使用 degree/3 标准化 SmoothL1；
 - 初始权重 `0.05`，只在 G1 稳定后测试。
+
+### 7.3.1 实测结论（2026-07-17）
+
+- G1 P0-700：ep927 best strict **96%**，SPD/`min_eig(G*)>0`/finite **100%**。
+- G1@100k vs G0：三 seed mean **43.07% vs 40.57%**（**+2.50pp**；95% CI ≈[41.56, 44.59]%）→ **锁定 `gstar6` 为生产默认输出表示**。
+- angMAE mean 6.65° vs G0 6.26°（略升，未达 −0.3° 条件门）；ortho/tet 有改善，mono/tric 仅轻度变化。
+- G2：decoded-cell 辅助损失阻碍 overfit（P0 卡在 ~78%），淘汰。
+- 详细表见 `docs/实验记录/20260717-A3-gstar6输出表示.md`。
+- 生产配置：`configs/scale_100k_a3_g1_gstar6.yaml`；对照保留 `configs/scale_100k_a2p5_a2ctrl_cscond.yaml`。
 
 ### 7.4 实验流程
 
