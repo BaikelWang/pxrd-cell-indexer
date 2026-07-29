@@ -148,8 +148,11 @@ class PeakGeometryTransformerEncoder(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
         # Learned query for attention pooling (only used when pool_mode == "attn").
+        # Kept in the state_dict for checkpoint compatibility across pool modes,
+        # but frozen when unused so DDP does not flag it as a no-grad parameter.
         self.pool_query = nn.Parameter(torch.zeros(d_model))
         nn.init.normal_(self.pool_query, std=0.02)
+        self.pool_query.requires_grad_(self.pool_mode == "attn")
         pool_out_dim = 3 * d_model if self.pool_mode == "cls_mean_max" else d_model
         self.out_norm = nn.LayerNorm(pool_out_dim)
         self.out_proj = nn.Linear(pool_out_dim, self.output_dim)
