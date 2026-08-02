@@ -44,16 +44,25 @@ epochs=${epochs:-34}
 lr=${lr:-$(python3 -c "print(1e-3 * ${target_global_batch} / 512)")}
 warmup_epochs=${warmup_epochs:-1.0}
 amp=${amp:-bf16}
+peaktf_scale=${peaktf_scale:-base}
+flow_layers=${flow_layers:-6}
+flow_hidden=${flow_hidden:-512}
 eval_k=${eval_k:-100}
 eval_every=${eval_every:-1}
 # 25 vs 400 integration steps moved the <1% hit rate by 1pp (probe_sample_steps),
 # so 50 is enough for selection; the final report can re-sample at 200.
 sample_steps=${sample_steps:-50}
-select_metric=${select_metric:-valid_1pct}
-select_tol=${select_tol:-0.01}
-valid_eval_n=${valid_eval_n:-300}
+# Stratified crystal-system subset + macro average (see 20260730 选模盲区笔记).
+# Old defaults valid_1pct / tol=0.01 / n=300 only saw cubic+tetragonal and saturated.
+select_metric=${select_metric:-valid_macro}
+select_tol=${select_tol:-0.002}
+valid_eval_n=${valid_eval_n:-700}
 eval_workers=${eval_workers:-48}
-mp100_every=${mp100_every:-0}
+# Train-only per-sample intensity thresholds (e.g. "5,2,1"); empty = fixed I>5.
+# Valid stays at I>5 so select_score remains comparable across runs.
+peak_imin_choices=${peak_imin_choices:-}
+# Report-only curve logging; never selects best.pt unless select_metric=mp100_l4.
+mp100_every=${mp100_every:-3}
 num_workers=${num_workers:-6}
 seed=${seed:-42}
 limit_train_batches=${limit_train_batches:-0}
@@ -76,6 +85,8 @@ echo "==== PXRD-indexer full-6M retrain (from scratch) ===="
 echo "GPUs              = ${n_gpu}"
 echo "global batch      = ${target_global_batch} (${batch_size} x ${n_gpu} x accum ${grad_accum})"
 echo "epochs / lr / amp = ${epochs} / ${lr} / ${amp} (warmup ${warmup_epochs})"
+echo "peaktf / flow     = scale=${peaktf_scale}  flow=${flow_layers}x${flow_hidden}"
+echo "peak I-threshold  = train:${peak_imin_choices:-fixed I>5}  valid:I>5"
 echo "selection         = ${select_metric} @ tol ${select_tol}, n=${valid_eval_n}, K=${eval_k}"
 echo "mp100             = every ${mp100_every} epoch(s) (0 = final only), report only"
 echo "out_dir / log     = ${out_dir} / ${log}"
@@ -89,6 +100,7 @@ launcher=(torchrun --nproc_per_node="${n_gpu}" --master_port="${MASTER_PORT:-165
 
 "${launcher[@]}" scripts/train_flow_seedgen.py \
     --backbone peaktf \
+    --peaktf-scale "${peaktf_scale}" \
     --equiv-target off \
     --train-jsonl "${train_jsonl}" \
     --valid-jsonl "${valid_jsonl}" \
@@ -102,8 +114,8 @@ launcher=(torchrun --nproc_per_node="${n_gpu}" --master_port="${MASTER_PORT:-165
     --weight-decay 0.05 \
     --warmup-epochs "${warmup_epochs}" \
     --amp "${amp}" \
-    --flow-layers 6 \
-    --flow-hidden 512 \
+    --flow-layers "${flow_layers}" \
+    --flow-hidden "${flow_hidden}" \
     --sample-steps "${sample_steps}" \
     --eval-k "${eval_k}" \
     --eval-every "${eval_every}" \
@@ -114,6 +126,7 @@ launcher=(torchrun --nproc_per_node="${n_gpu}" --master_port="${MASTER_PORT:-165
     --mp100-every "${mp100_every}" \
     --limit-train-batches "${limit_train_batches}" \
     --augment on \
+    --peak-imin-choices "${peak_imin_choices}" \
     --num-workers "${num_workers}" \
     --seed "${seed}" \
     --out-dir "${out_dir}" \

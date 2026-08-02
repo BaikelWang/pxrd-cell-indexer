@@ -489,7 +489,9 @@ def _search_sequential(
     # Axial (h00)/(0k0)/(00l) for the *short* real-space axis can sit at
     # relatively high 2θ; a tight n_low_peaks window drops them and yields
     # zero candidates on anisotropic cells. Use a wider window for diagonals.
-    n_axial_peaks = max(n_low_peaks, min(n_peaks_total, 12))
+    # Monoclinic: P0.3 residual empties often miss G11 in the first 12 peaks.
+    axial_window_cap = 16 if system.startswith("monoclinic") else 12
+    n_axial_peaks = max(n_low_peaks, min(n_peaks_total, axial_window_cap))
     q_low = q_obs[:n_low_peaks]
     q_axial = q_obs[:n_axial_peaks]
 
@@ -539,10 +541,15 @@ def _search_sequential(
     start = time.monotonic()
     deadline = start + time_budget_s
 
-    # Prefer small Miller indices (true low-angle axials are usually |h|<=3).
-    g11_opts.sort(key=lambda t: (t[1], t[0]))
-    g22_opts.sort(key=lambda t: (t[1], t[0]))
-    g33_opts.sort(key=lambda t: (t[1], t[0]))
+    # Triclinic: small Miller first. Ortho/mono pass-2: low-q peak first so
+    # harmonic axials on early peaks are not buried behind every peak's |h|=1.
+    if system == "triclinic":
+        _diag_sort_key = lambda t: (t[1], t[0])
+    else:
+        _diag_sort_key = lambda t: (t[0], t[1])
+    g11_opts.sort(key=_diag_sort_key)
+    g22_opts.sort(key=_diag_sort_key)
+    g33_opts.sort(key=_diag_sort_key)
 
     def _dedupe_diag_opts(
         opts: list[tuple[int, int, float]], cap: int
@@ -609,16 +616,23 @@ def _search_sequential(
     def _iter_diag_seeds():
         """Yield ((i,h,G11),(j,k,G22),(m,l,G33)) seeds.
 
-        Triclinic pass-1: triples that include the lowest-q peak as an axial
-        (100)/(010)/(001) with G11≥G22≥G33 — C(N-1,2) seeds.
-        Pass-2 (only if pass-1 found nothing): general low-Miller product.
-        """
-        if system != "triclinic":
-            return itertools.product(g11_opts, g22_opts, g33_opts)
+        Two-pass schedule (all sequential systems):
+          Pass-1 — low-q peak triples with small millers, one G11≥G22≥G33
+            labeling per (triple, miller). Avoids the miller-first×dedupe
+            product burying harmonic axials (|h|=2…) at rank ~10^4–10^5.
+          Pass-2 — general deduped axial-option product (lazy).
 
-        def _pass1():
-            # Lowest-q peak is an axial reflection on noiseless triclinic
-            # synthetics → C(N-1,2) instead of C(N,3).
+        Triclinic pass-1 additionally forces the lowest-q peak into the triple
+        with miller=1 only (C(N-1,2)), which cleared the synthetic Gate.
+        """
+        small_millers = [h for h in axial_idx if h <= 4] or [1, 2, 3, 4]
+        # Prefer low miller-sum so (1,1,1)…(2,2,2) precede (4,4,4).
+        miller_combos = sorted(
+            itertools.product(small_millers, repeat=3),
+            key=lambda t: (t[0] + t[1] + t[2], t),
+        )
+
+        def _pass1_triclinic():
             for rest in itertools.combinations(range(1, n_peaks_total), 2):
                 triple = (0, rest[0], rest[1])
                 ordered = sorted(triple, key=lambda idx: -float(q_obs[idx]))
@@ -629,20 +643,44 @@ def _search_sequential(
                     (i3, 1, float(q_obs[i3])),
                 )
 
+        def _pass1_ortho_mono():
+            # C(n_axial,3) × small-miller; assign axes by descending Gii so
+            # we don't pay 3! permutations. Prefer compact low-q triples
+            # (max peak index, then sum) — P0.3 residual had true axials at
+            # peaks (1,2,5); lex order buried that combo at rank ~3.6k.
+            triples = sorted(
+                itertools.combinations(range(n_axial_peaks), 3),
+                key=lambda t: (max(t), sum(t), t),
+            )
+            for triple in triples:
+                for h, k, l in miller_combos:
+                    # Pair each peak with one miller in triple order, then
+                    # re-label axes by Gii. Miller stays glued to its peak.
+                    paired = [
+                        (triple[0], h, float(q_obs[triple[0]] / (h * h))),
+                        (triple[1], k, float(q_obs[triple[1]] / (k * k))),
+                        (triple[2], l, float(q_obs[triple[2]] / (l * l))),
+                    ]
+                    paired.sort(key=lambda t: -t[2])
+                    yield (paired[0], paired[1], paired[2])
+
         def _pass2():
             for seed in itertools.product(g11_opts, g22_opts, g33_opts):
+                # Skip pure miller=1 triples already covered by pass-1 styles.
                 if seed[0][1] == seed[1][1] == seed[2][1] == 1:
                     continue
                 yield seed
 
-        # Materialize pass-1; keep pass-2 lazy and only run if pass-1 is empty.
-        return list(_pass1()), _pass2()
+        if system == "triclinic":
+            return list(_pass1_triclinic()), _pass2()
+        # Lazy pass-1 so early perfect-match can stop without building ~14k seeds.
+        return _pass1_ortho_mono(), _pass2()
 
-    tric_pass2_iter = None
-    if system == "triclinic":
-        diag_seed_iter, tric_pass2_iter = _iter_diag_seeds()
-    else:
-        diag_seed_iter = _iter_diag_seeds()
+    diag_seed_iter, pass2_iter = _iter_diag_seeds()
+    # Cap pass-1 wall time so the deduped product (pass-2) still runs when
+    # low-q triples miss the true axials (common on monoclinic empties).
+    pass1_fraction = 0.50 if system == "triclinic" else 0.55
+    pass1_deadline = start + pass1_fraction * time_budget_s
 
     def _consume_diag_seed(i1, h, g11, i2, k, g22, i3, l, g33) -> bool:
         """Process one axial seed. Returns False if search should stop."""
@@ -682,13 +720,15 @@ def _search_sequential(
         per_off: dict[str, list[tuple[float, tuple[int, int, int]]]] = {w: [] for w in offdiag_needed}
         # Prefer fundamentals (110)/(101)/(011) from every unused peak.
         # Do NOT rank by |Gij| — that drops large true couplings on oblique cells.
-        per_off_cap = 14 if len(offdiag_needed) >= 3 else 12
+        # Reserve half the cap for higher-zone (miller_sum>=3) so harmonics like
+        # (022) are not crowded out by every unused peak's (011) value (P0.3).
+        per_off_cap = 16 if len(offdiag_needed) >= 3 else 20
+        fund_cap = max(4, per_off_cap // 2)
         fund_hkl = {"g12": (1, 1, 0), "g13": (1, 0, 1), "g23": (0, 1, 1)}
         for which in offdiag_needed:
             # Always try the near-orthogonal / zero-coupling seed.
             per_off[which].append((0.0, (0, 0, 0)))
             scored: list[tuple[int, int, float, tuple[int, int, int]]] = []
-            # Fundamentals first (every unused peak), then higher-zone fillers.
             hkl_order = []
             if which in fund_hkl:
                 hkl_order.append(fund_hkl[which])
@@ -708,12 +748,20 @@ def _search_sequential(
                     scored.append((miller_sum, pi, float(val), zhkl))
             scored.sort(key=lambda t: (t[0], t[1]))
             uniq: list[tuple[float, tuple[int, int, int]]] = list(per_off[which])
-            for _ms, _pi, val, zhkl in scored:
-                if any(abs(val - u[0]) <= 1e-7 for u in uniq):
-                    continue
-                uniq.append((val, zhkl))
-                if len(uniq) >= per_off_cap:
-                    break
+
+            def _append_from(pred, *, limit: int) -> None:
+                for ms, _pi, val, zhkl in scored:
+                    if len(uniq) >= limit:
+                        return
+                    if not pred(ms):
+                        continue
+                    if any(abs(val - u[0]) <= 1e-7 for u in uniq):
+                        continue
+                    uniq.append((val, zhkl))
+
+            _append_from(lambda ms: ms <= 2, limit=fund_cap)
+            _append_from(lambda ms: ms >= 3, limit=per_off_cap)
+            _append_from(lambda _ms: True, limit=per_off_cap)
             per_off[which] = uniq
 
         if any(len(per_off[w]) == 0 for w in offdiag_needed):
@@ -779,12 +827,22 @@ def _search_sequential(
         return True
 
     for (i1, h, g11), (i2, k, g22), (i3, l, g33) in diag_seed_iter:
+        if time.monotonic() > pass1_deadline and system != "triclinic":
+            break
         if not _consume_diag_seed(i1, h, g11, i2, k, g22, i3, l, g33):
             break
     _flush_batch()
-    # Triclinic pass-2 only if pass-1 produced no keepers.
-    if system == "triclinic" and not candidates and tric_pass2_iter is not None:
-        for (i1, h, g11), (i2, k, g22), (i3, l, g33) in tric_pass2_iter:
+    # Pass-2: product fallback. Triclinic only when pass-1 kept nothing
+    # (alternate 100%-match frames are expensive). Ortho/mono continue when
+    # pass-1 has keepers but no perfect match — otherwise harmonic axials
+    # buried in the old product never get a second chance within budget.
+    run_pass2 = pass2_iter is not None and time.monotonic() < deadline
+    if system == "triclinic":
+        run_pass2 = run_pass2 and not candidates
+    else:
+        run_pass2 = run_pass2 and not _has_perfect()
+    if run_pass2:
+        for (i1, h, g11), (i2, k, g22), (i3, l, g33) in pass2_iter:
             if not _consume_diag_seed(i1, h, g11, i2, k, g22, i3, l, g33):
                 break
         _flush_batch()
@@ -1142,7 +1200,8 @@ DEFAULT_SEARCH_KWARGS: dict[str, dict] = {
         sparse_max_nonzero=1,
         n_low_peaks=6,
         pool_budget=30,
-        time_budget_s=10.0,
+        # Pass-1 axial triples; no offdiag product — 15s is enough headroom.
+        time_budget_s=15.0,
     ),
     "monoclinic": dict(
         max_hkl_index=3,
@@ -1151,8 +1210,9 @@ DEFAULT_SEARCH_KWARGS: dict[str, dict] = {
         sparse_max_nonzero=1,
         n_low_peaks=7,
         pool_budget=30,
-        # Split 3-way across monoclinic_a/b/c (~12s/variant).
-        time_budget_s=36.0,
+        # Split 3-way across monoclinic_a/b/c (~20s/variant). Pass-1 + zone
+        # offdiag needs ~10s on residual empties once triples are low-q-sorted.
+        time_budget_s=60.0,
     ),
     "triclinic": dict(
         max_hkl_index=4,

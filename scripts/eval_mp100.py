@@ -10,7 +10,12 @@ from typing import Any
 
 import torch
 
-from pxrd_cell_indexing.data.mp100 import load_mp100_dataset, peaks_to_model_tensors
+from pxrd_cell_indexing.data.dataset import SpectrumAugmentConfig
+from pxrd_cell_indexing.data.mp100 import (
+    DEFAULT_MP100_AUGMENT_SEED,
+    load_mp100_dataset,
+    peaks_to_model_tensors,
+)
 from pxrd_cell_indexing.data.normalization import (
     LatticeNormalizer,
     MatrixLatticeNormalizer,
@@ -250,7 +255,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     convention = args.convention or infer_canonical_convention_from_checkpoint(raw_ckpt)
     if convention == "unknown":
         convention = "primitive"
-    samples = load_mp100_dataset(args.mp100_dir, convention=convention)
+    augment_config = None
+    if args.xrd_augment:
+        augment_config = SpectrumAugmentConfig(
+            noise_level=args.augment_noise_level,
+            shift_range=args.augment_shift_range,
+            scale_range=(args.augment_scale_min, args.augment_scale_max),
+        )
+    samples = load_mp100_dataset(
+        args.mp100_dir,
+        convention=convention,
+        xrd_augment=bool(args.xrd_augment),
+        augment_seed=int(args.augment_seed),
+        augment_config=augment_config,
+    )
     model, _, experiment_name = load_indexing_model_from_checkpoint(
         args.checkpoint, config, device
     )
@@ -310,7 +328,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "experiment": experiment_name,
         "checkpoint": str(args.checkpoint),
         "mp100_dir": str(args.mp100_dir),
-        "convention": args.convention,
+        "convention": convention,
+        "xrd_augment": bool(args.xrd_augment),
+        "augment_seed": int(args.augment_seed) if args.xrd_augment else None,
+        "augment": (
+            {
+                "noise_level": args.augment_noise_level,
+                "shift_range": args.augment_shift_range,
+                "scale_range": [args.augment_scale_min, args.augment_scale_max],
+            }
+            if args.xrd_augment
+            else None
+        ),
         "top_k": args.top_k,
         "scale_set": args.scale_set,
         "length_scale_factors": list(scale_factors),
@@ -352,6 +381,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--xrd-augment",
+        action="store_true",
+        help="Apply RealPXRD-style online XRD noise to MP100 peaks (default: ideal)",
+    )
+    parser.add_argument(
+        "--augment-seed",
+        type=int,
+        default=DEFAULT_MP100_AUGMENT_SEED,
+        help="Base seed for per-sample augment RNG (default 42)",
+    )
+    parser.add_argument("--augment-noise-level", type=float, default=0.05)
+    parser.add_argument("--augment-shift-range", type=float, default=0.1)
+    parser.add_argument("--augment-scale-min", type=float, default=0.8)
+    parser.add_argument("--augment-scale-max", type=float, default=1.2)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument(
         "--scale-set",

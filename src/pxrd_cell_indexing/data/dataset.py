@@ -33,6 +33,10 @@ class PeakFilterConfig:
     intensity_min: float = 5.0
     max_peaks: int | None = None
     input_axis: str = "two_theta"
+    intensity_min_choices: tuple[float, ...] | None = None
+    """Train-time only: draw the threshold per sample from these values instead of
+    ``intensity_min``. Requires ``xrd_augment``; valid/test always use
+    ``intensity_min`` so the selection metric stays comparable across runs."""
 
 
 @dataclass(frozen=True)
@@ -172,12 +176,17 @@ def augment_spectrum(
     rng: Generator | None = None,
     *,
     pre_filter_intensity: np.ndarray | None = None,
+    intensity_min: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Port RealPXRD ``app/data/dataset.py::augment_spectrum`` with D23 quirk.
 
     D23: upstream re-applies ``pxrd_y > 5`` using the *pre-augmentation* filtered
     intensity array (always all-True), not the augmented intensities. We replicate
     that no-op second filter for checkpoint-compatible training.
+
+    ``intensity_min`` must match the threshold already applied by ``filter_peaks``,
+    otherwise this second mask stops being a no-op and silently reverts the peak
+    set to ``> 5`` — which made every sub-5 training threshold ineffective.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -202,7 +211,7 @@ def augment_spectrum(
         intensity_aug = intensity_aug / max_intensity * 100.0
 
     # D23: upstream bug/no-op — mask uses pre-augment filtered intensities.
-    mask_aug = pre_filter_intensity > 5
+    mask_aug = pre_filter_intensity > intensity_min
     two_theta_final = two_theta_aug[mask_aug]
     intensity_final = intensity_aug[mask_aug]
 
@@ -257,21 +266,40 @@ class PXRDDataset(Dataset[DatasetSample]):
         pxrd_x = np.asarray(data["pxrd_x"], dtype=np.float32)
         pxrd_y = np.asarray(data["pxrd_y"], dtype=np.float32)
 
+        peak_filter = self.config.peak_filter
+        intensity_min = float(peak_filter.intensity_min)
+        if self.config.xrd_augment and peak_filter.intensity_min_choices:
+            intensity_min = float(self._ensure_rng().choice(peak_filter.intensity_min_choices))
+
         two_theta, intensity = filter_peaks(
             pxrd_x,
             pxrd_y,
-            intensity_min=self.config.peak_filter.intensity_min,
-            max_peaks=self.config.peak_filter.max_peaks,
+            intensity_min=intensity_min,
+            max_peaks=peak_filter.max_peaks,
         )
 
-        # jsonl peak_num_filtered was exported under the default I>5 / no max_peaks
-        # filter. When runtime PeakFilterConfig intentionally differs, mismatch is
-        # expected and must not spam warnings (100k × warn kills training I/O).
-        export_default_filter = (
-            abs(float(self.config.peak_filter.intensity_min) - 5.0) < 1e-9
-            and self.config.peak_filter.max_peaks is None
-        )
-        if not self.config.xrd_augment and export_default_filter:
+        if self.config.xrd_augment:
+            if self.config.augment_mode == "robust":
+                two_theta, intensity = apply_random_robust_perturbation(
+                    two_theta,
+                    intensity,
+                    self.config.robust_augment,
+                    self._ensure_rng(),
+                    intensity_min=intensity_min,
+                )
+            else:
+                pre_filter = intensity.copy()
+                two_theta, intensity = augment_spectrum(
+                    two_theta,
+                    intensity,
+                    config=self.config.augment,
+                    rng=self._ensure_rng(),
+                    pre_filter_intensity=pre_filter,
+                    intensity_min=intensity_min,
+                )
+        elif abs(intensity_min - 5.0) < 1e-9 and peak_filter.max_peaks is None:
+            # jsonl peak_num_filtered was exported under the default I>5 / no
+            # max_peaks filter, so only then does a mismatch mean inconsistency.
             if two_theta.shape[0] != record["peak_num_filtered"]:
                 message = (
                     f"peak count mismatch for {record['lmdb_key']}: "
@@ -280,23 +308,6 @@ class PXRDDataset(Dataset[DatasetSample]):
                 if self.config.strict:
                     raise ValueError(message)
                 warnings.warn(message, stacklevel=2)
-        elif self.config.xrd_augment and self.config.augment_mode == "robust":
-            two_theta, intensity = apply_random_robust_perturbation(
-                two_theta,
-                intensity,
-                self.config.robust_augment,
-                self._ensure_rng(),
-                intensity_min=self.config.peak_filter.intensity_min,
-            )
-        else:
-            pre_filter = intensity.copy()
-            two_theta, intensity = augment_spectrum(
-                two_theta,
-                intensity,
-                config=self.config.augment,
-                rng=self._ensure_rng(),
-                pre_filter_intensity=pre_filter,
-            )
 
         peak_num = int(two_theta.shape[0])
         return DatasetSample(

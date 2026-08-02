@@ -1,0 +1,120 @@
+{
+  "protocol": {
+    "data": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/data/rerank/v0_k1000_pert",
+    "n_train": 1175,
+    "n_dev": 290,
+    "selection_metric": "rr_dev top1 then mrr",
+    "forbidden": [
+      "MP100",
+      "CNRS"
+    ]
+  },
+  "baselines": {
+    "dev_mcm20_top1": 0.6689655172413793,
+    "dev_lib": 0.8827586206896552,
+    "train_mcm20_top1": 0.6306382978723404,
+    "train_lib": 0.8961702127659574
+  },
+  "linear_search": {
+    "best": {
+      "w": [
+        0.25,
+        0.75,
+        0.5
+      ],
+      "top1": 0.803448275862069,
+      "mrr": 0.9285425001234426
+    },
+    "equal_weight": {
+      "w": [
+        1.0,
+        1.0,
+        0.25
+      ],
+      "top1": 0.7551724137931034
+    }
+  },
+  "xgb": {
+    "ok": true,
+    "best_iteration": 21,
+    "top1_dev": 0.803448275862069,
+    "mrr_dev": 0.9251043153438302,
+    "feature_names": [
+      "p_mcm",
+      "p_nn_dist",
+      "vol_dev",
+      "McM20",
+      "Rp",
+      "n_indexed",
+      "nn_dist"
+    ]
+  },
+  "candidates": [
+    {
+      "name": "linear",
+      "top1": 0.803448275862069,
+      "mrr": 0.9285425001234426,
+      "config": {
+        "type": "linear",
+        "w": [
+          0.25,
+          0.75,
+          0.5
+        ]
+      }
+    },
+    {
+      "name": "equal_weight",
+      "top1": 0.7551724137931034,
+      "mrr": 0.8981113562933049,
+      "config": {
+        "type": "linear",
+        "w": [
+          1.0,
+          1.0,
+          0.25
+        ]
+      }
+    },
+    {
+      "name": "mcm20",
+      "top1": 0.6689655172413793,
+      "mrr": 0.8305460293678527,
+      "config": {
+        "type": "mcm20"
+      }
+    },
+    {
+      "name": "xgbranker",
+      "top1": 0.803448275862069,
+      "mrr": 0.9251043153438302,
+      "config": {
+        "type": "xgbranker",
+        "path": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/results/rerank_v0/v0_pert/xgbranker.json",
+        "feature_names": [
+          "p_mcm",
+          "p_nn_dist",
+          "vol_dev",
+          "McM20",
+          "Rp",
+          "n_indexed",
+          "nn_dist"
+        ],
+        "best_iteration": 21
+      }
+    }
+  ],
+  "winner": {
+    "name": "linear",
+    "top1": 0.803448275862069,
+    "mrr": 0.9285425001234426,
+    "config": {
+      "type": "linear",
+      "w": [
+        0.25,
+        0.75,
+        0.5
+      ]
+    }
+  }
+}

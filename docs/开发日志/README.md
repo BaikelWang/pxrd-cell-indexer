@@ -36,7 +36,8 @@
 | [`起点.md`](起点.md) | Cell Indexing 全历程复盘（2026-05～07 历史背景） |
 | [`20260713-RealPXRD-WithoutL-MP100评测与indexing对标综合报告.md`](20260713-RealPXRD-WithoutL-MP100评测与indexing对标综合报告.md) | Without-L MP100 复测、与 Mc/NN 口径澄清、可迁移启示 |
 | [`20260714-RealPXRD-纯XRD-lattice消融综合报告.md`](20260714-RealPXRD-纯XRD-lattice消融综合报告.md) | A2 消融：掐断 formula 后 MP100 elementwise 归零 |
-| [`20260715-CellIndexing-可执行优化方案v3.md`](20260715-CellIndexing-可执行优化方案v3.md) | **当前执行方案**：A0 评测 → E1c@100k → Peak Transformer → reciprocal metric → 训练课程/放量 → 全局搜索与排序 |
+| [`20260731-Reranker设计与实验方案.md`](20260731-Reranker设计与实验方案.md) | **当前执行方案**：seeded-Mc `.allcells` 重排；可捞空间量化、防泄漏训练数据、P0–P4 分阶段 Gate |
+| [`20260715-CellIndexing-可执行优化方案v3.md`](20260715-CellIndexing-可执行优化方案v3.md) | A0 评测 → E1c@100k → Peak Transformer → reciprocal metric → 训练课程/放量 → 全局搜索与排序 |
 | [`20260714-CellIndexing-Top1逐步优化方案v2.md`](20260714-CellIndexing-Top1逐步优化方案v2.md) | 已由 v3 取代；保留历史决策与阶段演进 |
 | [`20260706-任务初始化.md`](20260706-任务初始化.md) | 脚手架与文档约定 |
 | [`20260710-周报-W28.md`](20260710-周报-W28.md) | 周报 W28（2026-07-06~07-10） |

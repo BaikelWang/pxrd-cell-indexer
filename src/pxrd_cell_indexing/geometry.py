@@ -70,23 +70,37 @@ def direct_metric_from_lattice(cell: torch.Tensor) -> torch.Tensor:
     return matrix @ matrix.transpose(-1, -2)
 
 
+def _linalg_float32(x: torch.Tensor) -> tuple[torch.Tensor, torch.dtype]:
+    """cuBLAS LU / Cholesky do not implement BFloat16 (or sometimes FP16).
+
+    Run those kernels in float32 and cast the result back to the caller's dtype
+    so AMP autocast around flow sampling cannot crash eval.
+    """
+    if x.dtype in (torch.float32, torch.float64):
+        return x, x.dtype
+    return x.float(), x.dtype
+
+
 def reciprocal_metric_from_direct(
     g_direct: torch.Tensor,
     *,
     jitter: float = GSTAR6_SOLVE_JITTER,
 ) -> torch.Tensor:
     """G* = G^{-1} with a tiny diagonal jitter for numerical stability."""
-    eye = torch.eye(3, device=g_direct.device, dtype=g_direct.dtype)
+    g32, out_dtype = _linalg_float32(g_direct)
+    eye = torch.eye(3, device=g32.device, dtype=g32.dtype)
     # Broadcast eye to match leading batch dims when present.
-    while eye.ndim < g_direct.ndim:
+    while eye.ndim < g32.ndim:
         eye = eye.unsqueeze(0)
-    eye = eye.expand_as(g_direct)
-    return torch.linalg.solve(g_direct + float(jitter) * eye, eye)
+    eye = eye.expand_as(g32)
+    inv = torch.linalg.solve(g32 + float(jitter) * eye, eye)
+    return inv.to(dtype=out_dtype)
 
 
 def cholesky_lower_from_spd(matrix: torch.Tensor) -> torch.Tensor:
     """Lower-triangular Cholesky factor of an SPD matrix."""
-    return torch.linalg.cholesky(matrix)
+    m32, out_dtype = _linalg_float32(matrix)
+    return torch.linalg.cholesky(m32).to(dtype=out_dtype)
 
 
 def pack_gstar6_cholesky(chol_lower: torch.Tensor) -> torch.Tensor:

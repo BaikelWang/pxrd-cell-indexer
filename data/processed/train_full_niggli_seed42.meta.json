@@ -1,0 +1,16 @@
+{
+  "lmdb": "/nanolab/users/wyx/alex_aflow_oqmd_mp/datasets/pxrd_241113_train.lmdb",
+  "output": "/nanolab/users/wyx/Task/PRXD-Cell-indexing-model-0706/data/processed/train_full_niggli_seed42.jsonl",
+  "n_lmdb": 6088183,
+  "n_scanned": 6088183,
+  "n_kept": 5955602,
+  "crystal_system_counts": {
+    "cubic": 1420699,
+    "hexagonal": 200280,
+    "monoclinic": 964272,
+    "orthorhombic": 929844,
+    "tetragonal": 1657714,
+    "triclinic": 109187,
+    "trigonal": 673606
+  }
+}

@@ -12,6 +12,7 @@ from pxrd_cell_indexing.data.mp100 import (
     load_mp100_sample,
     peaks_to_model_tensors,
     simulate_pxrd_from_structure,
+    with_realpxrd_xrd_augment,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,3 +47,22 @@ def test_load_mp100_sample_from_real_cif() -> None:
 def test_load_mp100_dataset_count() -> None:
     samples = load_mp100_dataset(MP100_DIR)
     assert len(samples) == 100
+
+
+def test_mp100_realpxrd_augment_is_deterministic_and_changes_peaks() -> None:
+    cif_files = sorted(MP100_DIR.glob("*.cif"))
+    clean = load_mp100_sample(cif_files[0], xrd_augment=False)
+    noisy_a = load_mp100_sample(cif_files[0], xrd_augment=True, augment_seed=42)
+    noisy_b = load_mp100_sample(cif_files[0], xrd_augment=True, augment_seed=42)
+    noisy_c = with_realpxrd_xrd_augment(clean, augment_seed=42)
+    assert noisy_a.peak_num == noisy_b.peak_num
+    assert np.allclose(noisy_a.two_theta, noisy_b.two_theta)
+    assert np.allclose(noisy_a.intensity, noisy_b.intensity)
+    assert np.allclose(noisy_a.two_theta, noisy_c.two_theta)
+    # Augment should move at least one peak or intensity (RealPXRD noise/shift).
+    changed = (not np.allclose(clean.two_theta, noisy_a.two_theta)) or (
+        not np.allclose(clean.intensity, noisy_a.intensity)
+    )
+    assert changed
+    # Truth lattice must be untouched.
+    assert np.allclose(clean.truth_lattice, noisy_a.truth_lattice)

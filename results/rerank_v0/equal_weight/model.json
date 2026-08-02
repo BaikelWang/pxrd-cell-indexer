@@ -1,0 +1,16 @@
+{
+  "winner": {
+    "name": "equal_weight",
+    "top1": null,
+    "mrr": null,
+    "config": {
+      "type": "linear",
+      "w": [
+        1.0,
+        1.0,
+        0.25
+      ]
+    }
+  },
+  "note": "Untuned equal-weight from P0 design; weights NOT selected on MP100/CNRS. Used as interim freeze while full synthetic train finishes."
+}

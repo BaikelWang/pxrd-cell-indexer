@@ -10,9 +10,10 @@ MP100. Two reasons, both measured:
   K=1000 pool, 73% of samples had a 5%-hit while only 61% had a sub-1% one, so
   the loose metric overstates what the downstream can actually use.
 
-So the default selection metric is ``valid_1pct``: the fraction of a fixed
-valid subset with at least one draw whose aligned length error is under
-``--select-tol``. MP100 stays a final-report number.
+So the default selection metric is ``valid_macro``: mean over crystal systems
+of the hit rate on a stratified valid subset (avoids the cubic/tetragonal
+prefix trap), at ``--select-tol`` (default 0.2%). MP100 is report-only unless
+``--select-metric mp100_l4``.
 
 The ``--equiv-target`` switch is the ablation for the anti-mode-collapse
 mechanism: when on, each flow target is a random alternative basis of the true
@@ -28,6 +29,7 @@ import math
 import os
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -61,21 +63,37 @@ from pxrd_cell_indexing.model.encoder.peak_transformer import (  # noqa: E402
 from pxrd_cell_indexing.model.flow_head import ConditionalFlowHead  # noqa: E402
 from remeasure_l4_prim_vs_conv import CIF_DIR, l4, truth_cells  # noqa: E402
 
-ENCODER_CFG = {
+ENCODER_CFG_BASE = {
     "peak_transformer_max_peaks": 48,
     "peak_transformer_token_mode": "geom",
-    "peak_transformer_d_model": 256,
-    "peak_transformer_num_layers": 4,
-    "peak_transformer_num_heads": 8,
-    "peak_transformer_ffn_dim": 1024,
     "peak_transformer_dropout": 0.1,
     "peak_transformer_fourier_freqs": 16,
     "peak_transformer_pool": "cls_mean",
-    "output_dim": 512,
     "wavelength_angstrom": 1.54184,
     "intensity_transform": "linear",
     "intensity_min": 5.0,
 }
+
+# peaktf capacity presets. ``base`` = v2/v3 (~15M). ``wide`` = plan B.
+PEAKTF_SCALES = {
+    "base": dict(
+        peak_transformer_d_model=256,
+        peak_transformer_num_layers=4,
+        peak_transformer_num_heads=8,
+        peak_transformer_ffn_dim=1024,
+        output_dim=512,
+    ),
+    "wide": dict(
+        peak_transformer_d_model=512,
+        peak_transformer_num_layers=8,
+        peak_transformer_num_heads=8,
+        peak_transformer_ffn_dim=2048,
+        output_dim=1024,
+    ),
+}
+
+# Back-compat alias used by older code paths / checkpoints.
+ENCODER_CFG = {**ENCODER_CFG_BASE, **PEAKTF_SCALES["base"]}
 
 
 # Scheme F: scaled-up XRD encoders. Pretrained is d32/L2/ffn32 = 36,928 params;
@@ -117,6 +135,13 @@ def parse_args() -> argparse.Namespace:
         default="peaktf",
         help="peaktf: self-built PeakTransformer trained from scratch. "
         "armA: RealPXRD Bert + A2 CSPNet shell + gstar6 flow head.",
+    )
+    ap.add_argument(
+        "--peaktf-scale",
+        choices=sorted(PEAKTF_SCALES),
+        default="base",
+        help="PeakTransformer capacity. base=d256/L4 (~15M, v2/v3); "
+        "wide=d512/L8 + flow usually 8x1024 (plan B).",
     )
     ap.add_argument(
         "--arma-unfreeze",
@@ -173,18 +198,21 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--eval-every", type=int, default=2)
     ap.add_argument(
         "--select-metric",
-        choices=["valid_1pct", "mp100_l4"],
-        default="valid_1pct",
-        help="what best.pt is selected on. valid_1pct: held-out fraction with a "
-        "draw under --select-tol aligned length error. mp100_l4: the legacy "
-        "MP100 library@K at ltol=0.05 (noisy, n=100 -- kept for reproduction).",
+        choices=["valid_macro", "valid_worst", "valid_1pct", "mp100_l4"],
+        default="valid_macro",
+        help="what best.pt is selected on, all over the stratified valid subset. "
+        "valid_macro: mean over crystal systems of the fraction with a draw under "
+        "--select-tol aligned length error (default; pooled rates are dominated by "
+        "cubic and saturate). valid_worst: the same, worst system only. valid_1pct: "
+        "pooled rate. mp100_l4: the legacy MP100 library@K (a benchmark -- selecting "
+        "on it leaks, kept only to reproduce old runs).",
     )
-    ap.add_argument("--select-tol", type=float, default=0.01)
+    ap.add_argument("--select-tol", type=float, default=0.002)
     ap.add_argument(
         "--valid-eval-n",
         type=int,
-        default=300,
-        help="fixed prefix of the valid split used for selection",
+        default=700,
+        help="size of the crystal-system stratified valid subset used for selection",
     )
     ap.add_argument("--eval-workers", type=int, default=48)
     ap.add_argument(
@@ -201,6 +229,13 @@ def parse_args() -> argparse.Namespace:
         "Never used for selection unless --select-metric mp100_l4.",
     )
     ap.add_argument("--augment", choices=["on", "off"], default="on")
+    ap.add_argument(
+        "--peak-imin-choices",
+        default="",
+        help="train-only per-sample intensity thresholds, e.g. '5,2,1'. Empty = fixed I>5. "
+        "Aligns training with the multi-threshold inference protocol that lifted CNRS "
+        "orthorhombic recall from 12.9%% to 45.2%%. Valid always stays at I>5.",
+    )
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -228,13 +263,24 @@ def ddp_setup(use_cuda: bool) -> tuple[int, int, int]:
     return rank, world, local
 
 
+def parse_imin_choices(spec: str) -> tuple[float, ...] | None:
+    """Parse ``--peak-imin-choices`` (e.g. "5,2,1"); empty disables randomization."""
+    values = tuple(float(x) for x in spec.split(",") if x.strip())
+    return values or None
+
+
 def build_dataset(args, split: str, *, augment: bool):
+    # Randomized thresholds are train-only: valid keeps I>5 so select_score stays
+    # comparable across runs. PXRDDataset already gates them on xrd_augment.
+    choices = parse_imin_choices(getattr(args, "peak_imin_choices", "")) if augment else None
     return PXRDDataset(
         PXRDDatasetConfig(
             lmdb_path=Path(args.train_lmdb if split == "train" else args.valid_lmdb),
             split=split,
             sample_list_path=Path(args.train_jsonl if split == "train" else args.valid_jsonl),
-            peak_filter=PeakFilterConfig(intensity_min=5.0, max_peaks=None),
+            peak_filter=PeakFilterConfig(
+                intensity_min=5.0, max_peaks=None, intensity_min_choices=choices
+            ),
             xrd_augment=augment,
             augment=SpectrumAugmentConfig(shift_range=0.1),
             strict=False,
@@ -272,12 +318,20 @@ def randomize_targets(lattice: torch.Tensor, rng: np.random.Generator) -> torch.
     return torch.from_numpy(out.astype(np.float32))
 
 
+def peaktf_encoder_cfg(scale: str) -> dict:
+    if scale not in PEAKTF_SCALES:
+        raise ValueError(f"unknown peaktf scale {scale!r}; choose from {sorted(PEAKTF_SCALES)}")
+    return {**ENCODER_CFG_BASE, **PEAKTF_SCALES[scale]}
+
+
 class SeedGenerator(torch.nn.Module):
     def __init__(self, args) -> None:
         super().__init__()
-        self.encoder = PeakGeometryTransformerEncoder(dict(ENCODER_CFG))
+        scale = getattr(args, "peaktf_scale", "base")
+        self.encoder_cfg = peaktf_encoder_cfg(scale)
+        self.encoder = PeakGeometryTransformerEncoder(dict(self.encoder_cfg))
         self.flow = ConditionalFlowHead(
-            embedding_dim=ENCODER_CFG["output_dim"],
+            embedding_dim=self.encoder_cfg["output_dim"],
             hidden=args.flow_hidden,
             num_layers=args.flow_layers,
         )
@@ -383,7 +437,8 @@ def _score_valid_sample(payload):
 
 @torch.no_grad()
 def evaluate_valid_precision(
-    net, normalizer, batches, device, *, k: int, steps: int, seed: int, workers: int
+    net, normalizer, batches, device, *, k: int, steps: int, seed: int, workers: int,
+    labels: list[str] | None = None,
 ) -> dict:
     """Fraction of the fixed valid subset with a draw inside each error tolerance.
 
@@ -404,7 +459,8 @@ def evaluate_valid_precision(
         gen = torch.Generator(device=device).manual_seed(seed)
         z = net.sample(emb, num_samples=k, steps=steps, generator=gen)  # [B, K, 6]
         bsz = z.shape[0]
-        cells = gstar6_to_lattice((std * z + mean).reshape(-1, 6))
+        # Decode in fp32: cuBLAS LU is not implemented for bf16 (v3 crash).
+        cells = gstar6_to_lattice((std.float() * z.float() + mean.float()).reshape(-1, 6))
         cells = cells.reshape(bsz, k, 6).cpu().numpy()
         truths = batch["lattice"].numpy()
         payloads.extend((cells[i], truths[i].tolist()) for i in range(bsz))
@@ -414,30 +470,81 @@ def evaluate_valid_precision(
 
     n = len(best)
     hits = [e for e in best if e is not None]
-    return {
+    out = {
         "n": n,
         "hit_rate": {str(t): sum(1 for e in hits if e < t) / max(n, 1) for t in SELECT_TOLS},
         "median_best_err": float(np.median(hits)) if hits else None,
         "frac_any_hit": len(hits) / max(n, 1),
     }
+    if labels and len(labels) == n:
+        by_sys: dict[str, dict] = {}
+        for s in sorted(set(labels)):
+            errs = [best[i] for i in range(n) if labels[i] == s]
+            m = max(len(errs), 1)
+            ok = [e for e in errs if e is not None]
+            by_sys[s] = {
+                "n": len(errs),
+                "hit_rate": {str(t): sum(1 for e in ok if e < t) / m for t in SELECT_TOLS},
+                "frac_any_hit": len(ok) / m,
+            }
+        out["by_system"] = by_sys
+        # Worst system at the selection tolerance: a single number that cannot be
+        # carried by cubic alone.
+        out["worst_system_hit"] = {
+            str(t): min(v["hit_rate"][str(t)] for v in by_sys.values()) for t in SELECT_TOLS
+        }
+        out["macro_hit"] = {
+            str(t): float(np.mean([v["hit_rate"][str(t)] for v in by_sys.values()]))
+            for t in SELECT_TOLS
+        }
+    return out
 
 
-def load_valid_eval_batches(args, n: int) -> list:
-    """Fixed prefix of the valid split, un-augmented, kept in memory."""
+def stratified_valid_indices(args, n: int) -> tuple[list[int], list[str]]:
+    """Even split of ``n`` selection samples across the crystal systems present.
+
+    ``valid1400_niggli_seed42.jsonl`` stores the systems in contiguous blocks
+    (200 cubic, then 200 tetragonal, ...), so a plain prefix selects only the
+    two highest-symmetry systems and the metric saturates while orthorhombic and
+    monoclinic go unmeasured. Sampling per system keeps the selection signal on
+    the cases that actually decide the benchmark.
+    """
+    records = [
+        json.loads(line)
+        for line in Path(args.valid_jsonl).read_text().splitlines()
+        if line.strip()
+    ]
+    by_system: dict[str, list[int]] = {}
+    for i, rec in enumerate(records):
+        by_system.setdefault(str(rec.get("crystal_system", "unknown")), []).append(i)
+
+    systems = sorted(by_system)
+    per = max(1, n // max(len(systems), 1))
+    chosen: list[int] = []
+    for s in systems:
+        idx = by_system[s]
+        # Even stride rather than the head of the block, so the subset is not
+        # correlated with whatever order the exporter happened to use.
+        step = max(1, len(idx) // per)
+        chosen.extend(idx[::step][:per])
+    chosen.sort()
+    labels = [str(records[i].get("crystal_system", "unknown")) for i in chosen]
+    return chosen, labels
+
+
+def load_valid_eval_batches(args, n: int) -> tuple[list, list[str]]:
+    """Crystal-system stratified valid subset, un-augmented, kept in memory."""
+    from torch.utils.data import Subset
+
+    indices, labels = stratified_valid_indices(args, n)
     loader = DataLoader(
-        build_dataset(args, "valid", augment=False),
+        Subset(build_dataset(args, "valid", augment=False), indices),
         batch_size=64,
         shuffle=False,
         num_workers=min(4, args.num_workers),
         collate_fn=collate_peak_batch,
     )
-    batches, seen = [], 0
-    for batch in loader:
-        batches.append(batch)
-        seen += batch["lattice"].shape[0]
-        if seen >= n:
-            break
-    return batches
+    return list(loader), labels
 
 
 def load_mp100_eval(device):
@@ -469,8 +576,9 @@ def evaluate_coverage(model, normalizer, items, device, *, k: int, steps: int) -
     for item in items:
         emb = model.encode(item["pxrd_x"], item["pxrd_y"], item["peak_num"])
         z = model.sample(emb, num_samples=k, steps=steps)[0]  # [K, 6]
-        comp = torch.tensor(normalizer.component_std, device=z.device) * z + torch.tensor(
-            normalizer.component_mean, device=z.device
+        comp = (
+            torch.tensor(normalizer.component_std, device=z.device, dtype=torch.float32) * z.float()
+            + torch.tensor(normalizer.component_mean, device=z.device, dtype=torch.float32)
         )
         cells = gstar6_to_lattice(comp).cpu().numpy()
 
@@ -514,6 +622,8 @@ METRIC_COLUMNS = [
     "valid_hit_1pct",
     "valid_hit_5pct",
     "valid_median_err",
+    "valid_macro_hit",
+    "valid_worst_system_hit",
     "select_score",
     "mp100_library_strict",
     "elapsed_s",
@@ -554,9 +664,9 @@ def main() -> None:
     train_loader, train_sampler = build_loader(args, "train", world_size=world, rank=rank)
     valid_loader, _ = build_loader(args, "valid")
 
-    valid_eval_batches = mp100 = None
+    valid_eval_batches = mp100 = valid_eval_labels = None
     if is_main:
-        valid_eval_batches = load_valid_eval_batches(args, args.valid_eval_n)
+        valid_eval_batches, valid_eval_labels = load_valid_eval_batches(args, args.valid_eval_n)
         n_valid_eval = sum(b["lattice"].shape[0] for b in valid_eval_batches)
         mp100 = load_mp100_eval(device)
         log(
@@ -564,11 +674,21 @@ def main() -> None:
             f"global batch={args.batch_size * world * max(1, args.grad_accum)} "
             f"valid batches={len(valid_loader)} select_set={n_valid_eval} mp100={len(mp100)}"
         )
+        counts = Counter(valid_eval_labels)
+        log(f"select_set systems: {dict(sorted(counts.items()))}")
         log(f"select_metric={args.select_metric} tol={args.select_tol:.1%} k={args.eval_k}")
 
     model = build_model(args, normalizer).to(device)
     n_par = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_tot = sum(p.numel() for p in model.parameters())
+    if is_main and args.backbone == "peaktf":
+        cfg = peaktf_encoder_cfg(args.peaktf_scale)
+        log(
+            f"peaktf_scale={args.peaktf_scale} "
+            f"d={cfg['peak_transformer_d_model']} L={cfg['peak_transformer_num_layers']} "
+            f"ffn={cfg['peak_transformer_ffn_dim']} out={cfg['output_dim']} "
+            f"flow={args.flow_layers}x{args.flow_hidden}"
+        )
     if args.backbone == "armA":
         shell = "no_cspnet" if args.arma_no_cspnet else "cspnet"
         extra = (
@@ -714,6 +834,7 @@ def main() -> None:
                         steps=args.sample_steps,
                         seed=args.seed,
                         workers=args.eval_workers,
+                        labels=valid_eval_labels,
                     )
                 row["valid_precision"] = prec
                 row["valid_hit_0.2pct"] = prec["hit_rate"]["0.002"]
@@ -721,6 +842,9 @@ def main() -> None:
                 row["valid_hit_1pct"] = prec["hit_rate"]["0.01"]
                 row["valid_hit_5pct"] = prec["hit_rate"]["0.05"]
                 row["valid_median_err"] = prec["median_best_err"]
+                if "macro_hit" in prec:
+                    row["valid_macro_hit"] = prec["macro_hit"][str(args.select_tol)]
+                    row["valid_worst_system_hit"] = prec["worst_system_hit"][str(args.select_tol)]
 
             want_mp100 = epoch == args.epochs or (
                 args.mp100_every > 0 and epoch % args.mp100_every == 0
@@ -732,7 +856,11 @@ def main() -> None:
                     )
                 row["mp100"] = cov
                 row["mp100_library_strict"] = cov["library_strict"]
-            if args.select_metric == "valid_1pct":
+            if args.select_metric == "valid_macro":
+                score = prec["macro_hit"][str(args.select_tol)] if prec else None
+            elif args.select_metric == "valid_worst":
+                score = prec["worst_system_hit"][str(args.select_tol)] if prec else None
+            elif args.select_metric == "valid_1pct":
                 score = prec["hit_rate"][str(args.select_tol)] if prec else None
             else:
                 score = row.get("mp100_library_strict")
@@ -746,6 +874,11 @@ def main() -> None:
                     f"<5%={prec['hit_rate']['0.05']:.0%} "
                     f"med={prec['median_best_err'] or float('nan'):.4%}"
                 )
+                if "macro_hit" in prec:
+                    parts.append(
+                        f"| macro={prec['macro_hit'][str(args.select_tol)]:.0%} "
+                        f"worst={prec['worst_system_hit'][str(args.select_tol)]:.0%}"
+                    )
             if "mp100_library_strict" in row:
                 parts.append(f"| mp100@{args.eval_k}={row['mp100_library_strict']:.0%}")
             print(" ".join(parts), flush=True)
@@ -757,7 +890,9 @@ def main() -> None:
                         "model_state": net.state_dict(),
                         "optimizer_state": opt.state_dict(),
                         "args": vars(args),
-                        "encoder_cfg": ENCODER_CFG,
+                        "encoder_cfg": peaktf_encoder_cfg(args.peaktf_scale)
+                        if args.backbone == "peaktf"
+                        else ENCODER_CFG,
                         "normalizer": normalizer.to_dict(),
                         "select_metric": args.select_metric,
                         "select_score": score,
@@ -775,7 +910,9 @@ def main() -> None:
                     "model_state": net.state_dict(),
                     "optimizer_state": opt.state_dict(),
                     "args": vars(args),
-                    "encoder_cfg": ENCODER_CFG,
+                    "encoder_cfg": peaktf_encoder_cfg(args.peaktf_scale)
+                    if args.backbone == "peaktf"
+                    else ENCODER_CFG,
                     "normalizer": normalizer.to_dict(),
                     "epoch": epoch,
                 },

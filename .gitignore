@@ -68,6 +68,23 @@ data/**/*.hdf5
 # --- Experiment outputs ---
 results/**/*
 !results/README.md
+# Keep frozen rerank V0 manifest (tiny JSON, no weights)
+!results/rerank_v0/
+!results/rerank_v0/**
+results/rerank_v0/**/*.pt
+results/rerank_v0/**/*.pth
+
+# --- Large local artifacts (rebuild / mount separately) ---
+third_party/
+data/rerank/
+data/jade-index/
+data/single-samples/
+data/processed/mp100_realpxrd_augment_seed42/
+data/processed/robust_valid/
+PBSO4.csv
+PbSO4-Wyckoff.cif
+scripts/_tmp_*
+scripts/_watch_*
 
 # --- Local secrets / env ---
 .env
