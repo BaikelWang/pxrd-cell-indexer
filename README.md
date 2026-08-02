@@ -1,47 +1,63 @@
 # PXRD Cell Indexer
 
-从粉末 XRD **峰表**预测 **Niggli 原胞** `(a, b, c, α, β, γ)` 的神经 cell indexing，并经 **seeded McMaille** 扩库、可选 **rerank** 出 Top-1 / Top-20。
+<p align="center">
+  <strong>粉末 XRD 峰表 → Niggli 原胞</strong><br/>
+  神经 seed · seeded McMaille · 可选重排 · primitive L4-strict
+</p>
 
-本仓库只做 **indexing（定胞）**，不做全结构生成。
-
-```text
-peaks + λ
-  → NN Flow seed (K)
-  → symmetrize + LSQ
-  → seeded McMaille (.allcells)
-  → rank: McM20 或 linear rerank
-  → Top-1 / Top-20  (primitive L4-strict)
-```
+<p align="center">
+  <code>indexing only</code> · 不做全结构生成<br/>
+  产品默认：<strong>V4 + K=100/1000 + equal-weight rerank</strong>
+</p>
 
 ---
 
-## 1. 当前产品口径（2026-08）
+## Pipeline at a glance
 
-### 1.1 端到端流程
+```mermaid
+flowchart LR
+  A["① Peaks + λ"] --> B["② NN Flow<br/>seed ×K"]
+  B --> C["③ Symmetrize<br/>+ LSQ"]
+  C --> D["④ Seeded<br/>McMaille"]
+  D --> E["⑤ Rank<br/>McM20 / V0"]
+  E --> F["⑥ Top-1 / Top-20<br/>L4-strict"]
 
-| 步 | 模块 | 说明 |
-|----|------|------|
-| ① | 峰输入 | CNRS：多阈值并集 `I≥5 ∪ I≥1`；MP100：模拟峰 |
-| ② | NN seed | Peak Transformer + Flow，采样 K=100 / 1000 个 primitive seed |
-| ③ | 对称化 + LSQ | 投到常见晶系并精修 |
-| ④ | Seeded McMaille | `policy=1`，局部搜索扩候选 |
-| ⑤ | 排序 | `none`：McM20 降序；`linear`：V0 等权重重排 |
-| ⑥ | 评测 | **primitive L4-strict**（统一主指标） |
+  style A fill:#e8f1f8,stroke:#3d6f8f
+  style B fill:#e8f1f8,stroke:#3d6f8f
+  style C fill:#e8f1f8,stroke:#3d6f8f
+  style D fill:#e8f1f8,stroke:#3d6f8f
+  style E fill:#f3e8d8,stroke:#8a6a3d
+  style F fill:#e4efe6,stroke:#3d6b4a
+```
 
-Reranker **只置换** `.allcells` 顺序，不改 seed / LSQ / Mc，也不扩库（`lib` 不变）。挂接点：`scripts/run_cnrs_e2e_compare.py:seeded_ordered_cells`（`--rerank {none,linear}`）。
+| 步 | 模块 | 做什么 |
+|:--:|------|--------|
+| ① | 峰输入 | CNRS：`I≥5 ∪ I≥1`；MP100：模拟峰 |
+| ② | NN seed | Peak Transformer + Flow，K=100 / 1000 |
+| ③ | Sym + LSQ | 对称化并精修 |
+| ④ | Seeded Mc | `policy=1` 局部搜索 → `.allcells` |
+| ⑤ | Rank | `none`=McM20；`linear`=V0 重排 |
+| ⑥ | Score | **primitive L4-strict** |
 
-### 1.2 主 checkpoint
+> Reranker **只换序**，不碰 seed / LSQ / Mc，也不扩库（`lib` 不变）。  
+> 挂接：`scripts/run_cnrs_e2e_compare.py` → `seeded_ordered_cells(--rerank …)`
 
-| 版本 | 路径 | 训练要点 |
-|------|------|----------|
-| **V4（产品默认）** | `results/flow_seedgen/pxrd_indexer_full6m_v4_wide_lr2e3/best.pt` | full6m · peaktf wide · 34 ep · 固定 I>5 · select `valid_macro@0.2%` |
-| V5（研究） | `results/flow_seedgen/pxrd_indexer_full6m_v5_imin/best.pt` | 同上 + 60 ep + 训练时 `peak_imin_choices=5,2,1` |
+---
 
-启动脚本：`scripts/launch_pxrd_indexer_full6m_v4_wide.sh`、`scripts/launch_pxrd_indexer_full6m_v5_imin.sh`。
+## 1. 产品口径（2026-08）
 
-### 1.3 看板数字（primitive L4-strict）
+### Checkpoints
 
-**CNRS**（123 条真实谱，产品优先）：
+| | V4 **产品默认** | V5 研究 |
+|---|---|---|
+| Path | `results/flow_seedgen/pxrd_indexer_full6m_v4_wide_lr2e3/best.pt` | `…/pxrd_indexer_full6m_v5_imin/best.pt` |
+| Train | full6m · wide · 34 ep · I>5 | + 60 ep · `imin∈{5,2,1}` |
+| Launch | `scripts/launch_pxrd_indexer_full6m_v4_wide.sh` | `…_v5_imin.sh` |
+| Select | `valid_macro@0.2%`（valid 仍固定 I>5） | 同左 |
+
+### 看板 · CNRS（真实谱，n=123）
+
+产品优先看这块。
 
 | 配置 | Top-1 | lib |
 |------|------:|----:|
@@ -52,7 +68,15 @@ Reranker **只置换** `.allcells` 顺序，不改 seed / LSQ / Mc，也不扩�
 | V5 · K=100 · McM20 | 40.7% | 64.2% |
 | V5 · K=100 · + rerank | 39.8% | 64.2% |
 
-**MP100**（100 条模拟）：
+```mermaid
+xychart-beta
+  title CNRS Top-1 % (primitive L4-strict)
+  x-axis ["V4 K100 McM", "V4 K100 RR", "V4 K1k McM", "V4 K1k RR", "V5 K100 McM", "V5 K100 RR"]
+  y-axis "Top-1 %" 25 --> 50
+  bar [39.0, 43.1, 31.7, 41.5, 40.7, 39.8]
+```
+
+### 看板 · MP100（模拟，n=100）
 
 | 配置 | Top-1 | lib |
 |------|------:|----:|
@@ -61,116 +85,147 @@ Reranker **只置换** `.allcells` 顺序，不改 seed / LSQ / Mc，也不扩�
 | **V5 · K=1000 · McM20** | **59%** | **74%** |
 | V5 · K=1000 · + rerank | 60% | 75% |
 
-**产品默认（盯 CNRS）**：**V4 + K=1000（或 K=100）+ equal-weight rerank**。  
-V5 在 valid / MP100 更好，但 CNRS 库召回未跟涨，且 V4 上锁定的 rerank **不能直接套到 V5**。
-
-多引擎对标详见实验记录（CNRS / MP100 + JADE9 等）。
-
----
-
-## 2. 关键结论（读这几条即可）
-
-1. **K↑ 抬 lib、压 McM20 Top-1**；要用 K=1000，必须配能迁移的排序（当前是 V0 rerank）。
-2. **Rerank V0**（冻结）：`score = McM20_pct + nn_dist_pct − 0.25·vol_dev`。在 V4 四池上均不降；合成优选 / XGB **跨不过 CNRS**，故默认用手写等权重。
-3. **Rerank 局限**：只换序；会 help/hurt；与 seed 分布强耦合；峰匹配类 FOM 往往伤分。
-4. **V5 vs V4**：合成指标↑、MP100↑；CNRS 正交 / raw lib 未兑现 imin 设计目标——**合成上学得更好 ≠ 实验谱更好**（域间隙，非简单负相关）。
-5. **下一步**不宜只堆同分布数据重训；优先实验域对齐的训练/选模，以及跟新 seed 重标定排序。
-
----
-
-## 3. Reranker（V0）
-
-```text
-NN seed → sym+LSQ → seeded Mc → .allcells
-                                    │
-                              ┌─────┴─────┐
-                              │  RERANKER │  ← 唯一改动点
-                              └─────┬─────┘
-                                    ↓
-                              Top-1 / Top-20
+```mermaid
+xychart-beta
+  title MP100 Top-1 % (primitive L4-strict)
+  x-axis ["V4 K100", "V4 K1k+RR", "V5 K1k McM", "V5 K1k+RR"]
+  y-axis "Top-1 %" 40 --> 70
+  bar [49, 57, 59, 60]
 ```
 
-| 项 | 内容 |
-|----|------|
-| 实现 | `src/pxrd_cell_indexing/rerank/linear_v0.py` |
-| 默认权重 | `(1, 1, 0.25)`，见 `results/rerank_v0/current/`（本地） |
-| 训练数据 | 扰动合成库 `data/rerank/`（gitignore，可重建） |
-| 设计 / 冻结评测 | [`docs/开发日志/20260731-Reranker设计与实验方案.md`](docs/开发日志/20260731-Reranker设计与实验方案.md) · [`docs/实验记录/20260731-Reranker-V0训练与冻结评测.md`](docs/实验记录/20260731-Reranker-V0训练与冻结评测.md) |
+**怎么选**
+
+```mermaid
+flowchart TD
+  Q{"主目标?"}
+  Q -->|CNRS / 实验谱| P["V4 + K=100 或 1000<br/>+ equal-weight rerank"]
+  Q -->|MP100 / 合成质量| R["V5 K=1000<br/>± rerank"]
+  P --> N["勿直接把 V4 权重套到 V5"]
+  R --> N
+
+  style P fill:#e4efe6,stroke:#3d6b4a
+  style R fill:#e8f1f8,stroke:#3d6f8f
+  style N fill:#f8ecec,stroke:#8a4a4a
+```
+
+多引擎对标（JADE / Mc / TREOR…）见下方文档索引。
+
+---
+
+## 2. 五条结论
+
+1. **K↑ 抬 lib、压 McM20 Top-1** → K=1000 必须配能迁移的排序（当前 V0）。
+2. **Rerank V0**：`McM20_pct + nn_dist_pct − 0.25·vol_dev`；合成优选 / XGB 跨不过 CNRS，故锁等权重。
+3. **Rerank 边界**：只换序；会 help/hurt；跟 seed 分布强耦合；峰匹配 FOM 往往伤分。
+4. **V5 vs V4**：valid / MP100↑；CNRS 正交与 raw lib 未兑现 → **合成更好 ≠ 实验更好**。
+5. **下一步**：别只堆同分布数据；优先实验域对齐 + 新 seed 上重标定排序。
+
+---
+
+## 3. Reranker V0
+
+```mermaid
+flowchart TD
+  S["NN seed → Sym+LSQ → Seeded Mc"] --> AC[".allcells 候选库"]
+  AC --> R{"--rerank"}
+  R -->|none| M["McM20 ↓"]
+  R -->|linear| L["V0 linear<br/>McM20_pct + nn_dist_pct − 0.25·vol_dev"]
+  M --> T["Top-1 / Top-20"]
+  L --> T
+
+  style L fill:#f3e8d8,stroke:#8a6a3d
+  style AC fill:#eef0f2,stroke:#666
+```
+
+| | |
+|---|---|
+| 实现 | [`src/pxrd_cell_indexing/rerank/linear_v0.py`](src/pxrd_cell_indexing/rerank/linear_v0.py) |
+| 默认权重 | `(1, 1, 0.25)` → [`results/rerank_v0/current/`](results/rerank_v0/current/) |
+| 训练数据 | `data/rerank/`（gitignore，可重建） |
+| 设计 / 冻结 | [设计方案](docs/开发日志/20260731-Reranker设计与实验方案.md) · [冻结评测](docs/实验记录/20260731-Reranker-V0训练与冻结评测.md) |
 
 ```bash
-# 冻结四池评测（不对评测集调参）
 python scripts/eval_rerank_freeze.py --model results/rerank_v0/current/model.json
 ```
 
 ---
 
-## 4. 指标与数据
+## 4. 模型 · Flow seed
+
+```mermaid
+flowchart LR
+  P["Peaks<br/>(2θ, I) + λ"] --> T["Peak Transformer<br/>wide · d=512 · L=8"]
+  T --> E["Embedding"]
+  E --> F["Conditional Flow<br/>8×1024"]
+  F --> K["K primitive<br/>seeds"]
+
+  style T fill:#e8f1f8,stroke:#3d6f8f
+  style F fill:#e8f1f8,stroke:#3d6f8f
+  style K fill:#e4efe6,stroke:#3d6b4a
+```
+
+| 项 | V4 / V5 共用 |
+|----|----------------|
+| Backbone | peaktf wide · FFN 2048 · out 1024 |
+| Flow | 8×1024 |
+| Optim | global batch 2048 · lr `2e-3` · bf16 |
+| Select | `valid_macro@0.2%` · MP100 探针 |
+
+V5 仅多：`epochs=60`、训练时 `peak_imin_choices=5,2,1`。
+
+```bash
+bash scripts/launch_pxrd_indexer_full6m_v4_wide.sh
+bash scripts/launch_pxrd_indexer_full6m_v5_imin.sh
+```
+
+核心：`scripts/train_flow_seedgen.py` · `src/pxrd_cell_indexing/data/dataset.py`
+
+---
+
+## 5. 指标与数据
 
 | | |
 |---|---|
-| **输入** | 变长峰表 `(2θ, I)` + `λ`（默认 Cu Kα 1.54184 Å） |
-| **输出** | Niggli 原胞六参数；e2e 经 Mc 后取 Top-k |
-| **推理契约** | peaks-only（无 formula / 无真实 CS） |
-| **主 KPI（产品）** | CNRS / MP100 **primitive L4-strict** Top-1 · Top-20 · lib |
-| **训练选模** | `valid_macro@0.2%`（分晶系宏平均；valid 峰阈值固定 I>5） |
-| **训练数据** | full6m LMDB（外部）；合成谱 + 增强 |
+| **输入** | `(2θ, I)` + `λ`（默认 Cu Kα 1.54184 Å） |
+| **输出** | Niggli 六参数 → e2e Top-k |
+| **契约** | peaks-only（无 formula / 无真实 CS） |
+| **产品 KPI** | CNRS / MP100 · L4-strict · Top-1 · Top-20 · lib |
+| **选模** | `valid_macro@0.2%`（I>5） |
+| **数据** | full6m LMDB（外部）· 合成谱 + 增强 |
 
-旧栈「valid1400 strict raw / A3-G1 + q-search」仍保留在代码与历史文档中，**不再是产品主线**。
+旧栈（A3-G1 raw + q-search）仍在仓库里，**不是产品主线**。
 
 ---
 
-## 5. 模型（Flow seed 栈）
-
-生产 seed 模型：`Peak Transformer (wide)` + **conditional Flow**，在 full6m 上 DDP 训练。
-
-| 项 | V4 / V5 共用设定 |
-|----|------------------|
-| Backbone | peaktf wide：`d=512` · `L=8` · FFN 2048 · out 1024 |
-| Flow | 8×1024 |
-| Batch / lr / amp | global 2048 · `2e-3` · bf16 |
-| Select | `valid_macro` @ 0.2% · K=100 探针含 MP100 |
-
-V5 仅多：`epochs=60`、`peak_imin_choices=5,2,1`（训练时随机峰强阈值；valid/select 仍 I>5）。
-
-训练入口：
+## 6. Quick start
 
 ```bash
-# 推荐：launch 包装（含 torchrun / 日志）
-bash scripts/launch_pxrd_indexer_full6m_v4_wide.sh
-bash scripts/launch_pxrd_indexer_full6m_v5_imin.sh
-
-# 或底层脚本
-bash scripts/train_pxrd_indexer_full6m.sh   # 见脚本内参数
+pip install -e ".[dev]"
+make test
 ```
 
-核心代码：`scripts/train_flow_seedgen.py`、`src/pxrd_cell_indexing/data/dataset.py`。
-
----
-
-## 6. 端到端评测（常用）
+### 端到端评测
 
 ```bash
-# CNRS 多阈值并集 e2e（需已编译的 McMaille 与 run_lab 布局）
-python scripts/run_cnrs_e2e_multithresh.py ...   # 见脚本 --help
-python scripts/run_cnrs_e2e_compare.py --rerank none    # McM20
-python scripts/run_cnrs_e2e_compare.py --rerank linear  # V0
+# CNRS（多阈值并集；需本地 McMaille）
+python scripts/run_cnrs_e2e_compare.py --rerank none     # McM20
+python scripts/run_cnrs_e2e_compare.py --rerank linear   # V0
 
-# MP100：dump seed → reseed Mc → 评分
+# MP100：dump seed → reseed（在 third_party/McMaille/run_lab/）→ 汇总
 python scripts/dump_flow_seed_pool.py ...
-# reseed 须在 third_party/McMaille/run_lab/ 下按既有 run 脚本执行
 python scripts/summarize_mp100_benchmark.py ...
 ```
 
-经典引擎对标：`scripts/run_cnrs_classic_engines.py`、`scripts/run_mp100_classic_engines.py`、`scripts/summarize_*_benchmark.py`。
+对标脚本：`run_cnrs_classic_engines.py` · `run_mp100_classic_engines.py` · `summarize_*_benchmark.py`
 
-本地依赖（不进 git）：
+### 本地依赖（不进 git）
 
 | 资源 | 说明 |
 |------|------|
 | 训练 LMDB | 外部 `pxrd_241113_*.lmdb` |
-| Checkpoint | `results/flow_seedgen/**/best.pt`（gitignore） |
-| McMaille / TREOR / ITO / DICVOL | `third_party/`（本地，gitignore） |
-| CNRS / RealPXRD 数据 | 按实验记录路径挂载 |
+| Checkpoint | `results/flow_seedgen/**/best.pt` |
+| 经典引擎 | `third_party/`（Mc / TREOR / ITO / DICVOL） |
+| CNRS 数据 | 见实验记录路径 |
 
 ---
 
@@ -179,54 +234,37 @@ python scripts/summarize_mp100_benchmark.py ...
 ```text
 pxrd-cell-indexer/
 ├── README.md · AGENT.md
-├── configs/                      # 含 100k A3-G1 历史配置、6M 相关 yaml
+├── configs/
 ├── docs/
-│   ├── 开发日志/                 # 方案、决策、周报
-│   ├── 实验记录/                 # 单次实验摘要
-│   └── references/               # 论文摘要（大文件 gitignore）
+│   ├── 开发日志/          # 方案 · 决策 · 周报
+│   ├── 实验记录/          # 单次实验
+│   └── references/
 ├── src/pxrd_cell_indexing/
 │   ├── data/ · model/ · training/
-│   ├── search/                   # 历史 q-search 轨
-│   ├── rerank/                   # V0 linear reranker
-│   └── geometry.py · eval.py …
-├── scripts/                      # 训练 · e2e · rerank · 对标 · 诊断
+│   ├── search/            # 历史 q-search
+│   ├── rerank/            # V0 linear
+│   └── geometry.py · eval.py
+├── scripts/               # train · e2e · rerank · 对标
 ├── tests/
 ├── data/MP-100samples-benchmark/
-├── results/                      # gitignore：ckpt / 跑分
-└── third_party/                  # 本地经典引擎（gitignore）
+├── results/               # gitignore（保留 rerank_v0 清单）
+└── third_party/           # 本地引擎 · gitignore
 ```
 
 ---
 
-## 8. Quick start
-
-```bash
-pip install -e ".[dev]"
-make test
-```
-
-历史 **A3-G1 raw 回归**（非当前产品主线）仍可用：
-
-```bash
-python scripts/train.py --config configs/scale_100k_a3_g1_gstar6.yaml
-python scripts/eval_mp100.py --checkpoint results/experiments/.../best.pt
-```
-
----
-
-## 9. 文档索引（近期优先）
+## 8. 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [`docs/实验记录/20260802-V5加Reranker端到端对比V4.md`](docs/实验记录/20260802-V5加Reranker端到端对比V4.md) | **V5 vs V4 + rerank** 看板 |
-| [`docs/实验记录/20260731-Reranker-V0训练与冻结评测.md`](docs/实验记录/20260731-Reranker-V0训练与冻结评测.md) | Rerank V0 冻结数字 |
-| [`docs/开发日志/20260731-Reranker设计与实验方案.md`](docs/开发日志/20260731-Reranker设计与实验方案.md) | Rerank 设计与 Gate |
-| [`docs/实验记录/20260731-K1000消融-CNRS与MP100.md`](docs/实验记录/20260731-K1000消融-CNRS与MP100.md) | K=100 vs 1000 |
-| [`docs/实验记录/20260729-CNRS多引擎L4对标.md`](docs/实验记录/20260729-CNRS多引擎L4对标.md) | CNRS 多引擎 |
-| [`docs/实验记录/20260731-MP100多引擎L4对标含JADE9.md`](docs/实验记录/20260731-MP100多引擎L4对标含JADE9.md) | MP100 含 JADE9 |
-| [`docs/开发日志/20260720-CellIndexing-后续优化方案v4.md`](docs/开发日志/20260720-CellIndexing-后续优化方案v4.md) | 早期 A3/q-search 方案（历史） |
-| [`docs/开发日志/起点.md`](docs/开发日志/起点.md) | 项目背景 |
-| [`AGENT.md`](AGENT.md) | Agent 协作约定 |
+| [V5 + Rerank vs V4](docs/实验记录/20260802-V5加Reranker端到端对比V4.md) | 最新端到端看板 |
+| [Reranker V0 冻结](docs/实验记录/20260731-Reranker-V0训练与冻结评测.md) | 四池数字 |
+| [Reranker 设计](docs/开发日志/20260731-Reranker设计与实验方案.md) | 方案与 Gate |
+| [K=1000 消融](docs/实验记录/20260731-K1000消融-CNRS与MP100.md) | K 与排序 |
+| [CNRS 多引擎](docs/实验记录/20260729-CNRS多引擎L4对标.md) | 真实谱对标 |
+| [MP100 + JADE9](docs/实验记录/20260731-MP100多引擎L4对标含JADE9.md) | 模拟谱对标 |
+| [起点](docs/开发日志/起点.md) | 项目背景 |
+| [AGENT.md](AGENT.md) | 协作约定 |
 
 ---
 
